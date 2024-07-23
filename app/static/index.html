@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/static/style.css">
+    <title>PDF Editor</title>
+</head>
+<body>
+    <h1>PDF Editor</h1>
+    <form id="uploadForm" enctype="multipart/form-data">
+        <input type="file" id="pdfFile" name="file" accept="application/pdf">
+        <button type="button" onclick="uploadPDF()">Upload PDF</button>
+    </form>
+    <div id="pdfViewer"></div>
+    <form id="annotationsForm">
+        <input type="hidden" id="filename" name="filename">
+        <textarea id="annotations" name="annotations"></textarea>
+        <button type="button" onclick="savePDF()">Save PDF</button>
+    </form>
+    <script src="/static/script.js"></script>
+    <div> Cane </div>
+</body>
+</html>
