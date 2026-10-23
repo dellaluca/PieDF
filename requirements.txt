@@ -1,6 +1,2 @@
-fastapi
-uvicorn
-PyMuPDF
-Pillow
-aiofiles
-python-multipart
+PySide6-Essentials==6.12.0
+PyMuPDF==2.0

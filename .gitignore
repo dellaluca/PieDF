@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Dati utente in modalità portatile (firme, impostazioni)
+data/
+
+.vscode/
+.idea/
