@@ -11,6 +11,7 @@ Messaggi in ingresso:
 Messaggi in uscita:
     ("page", gen, page, scale, width, height, stride, samples_rgb)
     ("error", gen, message)
+    ("closed", gen)                       documento chiuso: il file non è più aperto qui
 """
 
 import queue
@@ -38,6 +39,7 @@ def run(requests, results) -> None:
                     doc.close()
                 doc = None
                 if path is None:  # documento chiuso
+                    results.put(("closed", gen))
                     msg = _get_nowait(requests)
                     continue
                 try:

@@ -27,6 +27,7 @@ from piedf.signature_dialog import SignatureDialog
 from piedf.signature_manager import SignatureManager, thumbnail_pixmap
 from piedf.signatures import Kind, Signature, SignatureStore
 from piedf.viewer import FitMode, PdfView
+from piedf.writer import SaveError, has_digital_signatures, save_with_signatures
 
 MAX_RECENT = 10
 FIT_LABELS = {FitMode.WIDTH: "Adatta larghezza", FitMode.PAGE: "Adatta pagina"}
@@ -62,7 +63,10 @@ class MainWindow(QMainWindow):
         self.signatures = SignatureStore()
         self.placements = Placements(self)
         self.placements.changed.connect(self._update_title)
+        self.placements.undo_stack.cleanChanged.connect(self._update_enabled)
         self._path: str | None = None
+        self._password: str | None = None
+        self._save_path: str | None = None  # dove scrive "Salva"; None finché non si è salvato
         self._gen = 0
 
         self._renderer = Renderer(self)
@@ -91,6 +95,8 @@ class MainWindow(QMainWindow):
 
     def _build_actions(self) -> None:
         self.act_open = self._action("&Apri…", self._choose_file, [QKeySequence.StandardKey.Open])
+        self.act_save = self._action("&Salva", self.save, [QKeySequence.StandardKey.Save])
+        self.act_save_as = self._action("Salva &con nome…", self.save_as, ["Ctrl+Shift+S"])
         self.act_close = self._action("&Chiudi", self.close_document, ["Ctrl+W"])
         # StandardKey.Quit non ha una scorciatoia su Windows.
         self.act_quit = self._action("&Esci", self.close, ["Ctrl+Q"])
@@ -122,7 +128,7 @@ class MainWindow(QMainWindow):
         self.addAction(self.act_redo)
 
         self._doc_actions = [
-            self.act_close, self.act_zoom_in, self.act_zoom_out, self.act_actual,
+            self.act_save_as, self.act_close, self.act_zoom_in, self.act_zoom_out, self.act_actual,
             self.act_fit_page, self.act_fit_width, self.act_prev, self.act_next, self.act_goto,
         ]
 
@@ -131,6 +137,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_open)
         self._recent_menu = file_menu.addMenu("File &recenti")
         self._recent_menu.aboutToShow.connect(self._fill_recent_menu)
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_save)
+        file_menu.addAction(self.act_save_as)
         file_menu.addSeparator()
         file_menu.addAction(self.act_close)
         file_menu.addSeparator()
@@ -165,6 +174,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(bar)
 
         bar.addAction(self.act_open)
+        bar.addAction(self.act_save)
         bar.addSeparator()
 
         self.act_prev.setIconText("◀")
@@ -215,6 +225,7 @@ class MainWindow(QMainWindow):
         has_doc = self._path is not None
         for item in self._doc_actions + self._doc_widgets:
             item.setEnabled(has_doc)
+        self.act_save.setEnabled(has_doc and self.placements.modified)
 
     def _update_title(self) -> None:
         if self._path:
@@ -233,10 +244,9 @@ class MainWindow(QMainWindow):
         if path:
             self.open_file(path)
 
-    def open_file(self, path: str) -> bool:
+    def open_file(self, path: str, password: str | None = None) -> bool:
         path = os.path.abspath(path)
         name = Path(path).name
-        password = None
         while True:
             try:
                 doc = open_document(path, password)
@@ -264,6 +274,8 @@ class MainWindow(QMainWindow):
         self.placements.clear()
         self._gen += 1
         self._path = path
+        self._password = doc.password
+        self._save_path = None
         self._renderer.open(self._gen, path, doc.password)
         self.view.set_document(self._gen, doc.page_sizes)
         self._page_box.setRange(1, len(doc.page_sizes))
@@ -283,6 +295,8 @@ class MainWindow(QMainWindow):
             return False
         self.placements.clear()
         self._path = None
+        self._password = None
+        self._save_path = None
         self._gen += 1
         self._renderer.close(self._gen)
         self.view.clear()
@@ -293,18 +307,100 @@ class MainWindow(QMainWindow):
         return True
 
     def _confirm_discard(self) -> bool:
-        """Chiede se scartare le firme non salvate; False se l'utente annulla."""
+        """Chiede se salvare o scartare le firme non salvate; False se l'utente annulla."""
         if self._path is None or not self.placements.modified:
             return True
+        Button = QMessageBox.StandardButton
         box = QMessageBox(
             QMessageBox.Icon.Warning, "Firme non salvate",
             f"Le firme aggiunte a «{Path(self._path).name}» non sono state salvate.",
-            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel, self,
+            Button.Save | Button.Discard | Button.Cancel, self,
         )
-        box.button(QMessageBox.StandardButton.Discard).setText("Scarta")
-        box.button(QMessageBox.StandardButton.Cancel).setText("Annulla")
-        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        return box.exec() == QMessageBox.StandardButton.Discard
+        box.button(Button.Save).setText("Salva")
+        box.button(Button.Discard).setText("Scarta")
+        box.button(Button.Cancel).setText("Annulla")
+        box.setDefaultButton(Button.Save)
+        answer = box.exec()
+        if answer == Button.Save:
+            return self.save()
+        return answer == Button.Discard
+
+    # --- Salvataggio ------------------------------------------------------------------
+
+    def save(self) -> bool:
+        """Il primo Salva di un documento chiede il nome, per non sovrascrivere l'originale per sbaglio."""
+        if self._path is None:
+            return False
+        if self._save_path is None:
+            return self.save_as()
+        return self._save_to(self._save_path)
+
+    def save_as(self) -> bool:
+        if self._path is None:
+            return False
+        if self._save_path is not None:
+            proposed = self._save_path
+        else:
+            src = Path(self._path)
+            proposed = str(src.with_name(f"{src.stem}_firmato.pdf"))
+        # Il dialog chiede già la conferma se il file esiste.
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Salva PDF firmato", proposed, "Documenti PDF (*.pdf)"
+        )
+        if not dest:
+            return False
+        if not Path(dest).suffix:
+            dest += ".pdf"
+        return self._save_to(os.path.abspath(dest))
+
+    def _save_to(self, dest: str) -> bool:
+        if has_digital_signatures(self._path, self._password):
+            Button = QMessageBox.StandardButton
+            box = QMessageBox(
+                QMessageBox.Icon.Warning, "Firme digitali",
+                "Questo documento contiene firme digitali. Aggiungere la firma le renderà "
+                "non più valide in Acrobat. Continuare?",
+                Button.Ok | Button.Cancel, self,
+            )
+            box.button(Button.Ok).setText("Continua")
+            box.button(Button.Cancel).setText("Annulla")
+            box.setDefaultButton(Button.Cancel)
+            if box.exec() != Button.Ok:
+                return False
+
+        self.view.cancel_placing()
+        src, password = self._path, self._password
+        overwrite = os.path.normcase(dest) == os.path.normcase(src)
+        # Il processo di render tiene aperto il file: va rilasciato prima di sovrascriverlo.
+        if overwrite and not self._renderer.close(self._gen, wait=True):
+            self._renderer.open(self._gen, src, password)
+            QMessageBox.critical(self, "Salvataggio non riuscito", "Il documento è ancora in uso, riprova.")
+            return False
+        try:
+            save_with_signatures(src, password, self.placements.items, dest, self.placements.missing_pngs())
+        except SaveError as e:
+            if overwrite:
+                self._renderer.open(self._gen, src, password)
+                self.view.reload()
+            QMessageBox.critical(self, "Salvataggio non riuscito", str(e))
+            return False
+
+        # Le firme ora fanno parte del PDF: non sono più modificabili né annullabili.
+        page, zoom, fit = self.view.current_page, self.view.zoom, self.view.fit_mode
+        scroll_x, scroll_y = self.view.horizontalScrollBar().value(), self.view.verticalScrollBar().value()
+        self.placements.clear()
+        if not self.open_file(dest, password):
+            return False
+        if fit == FitMode.NONE:
+            self.view.set_zoom(zoom)
+        else:
+            self.view.set_fit_mode(fit)
+        self.view.go_to_page(page)
+        self.view.horizontalScrollBar().setValue(scroll_x)
+        self.view.verticalScrollBar().setValue(scroll_y)
+        self._save_path = dest
+        self.statusBar().showMessage(f"Salvato in {Path(dest).name}", 10000)
+        return True
 
     def _on_render_failed(self, gen: int, message: str) -> None:
         if gen == self._gen:

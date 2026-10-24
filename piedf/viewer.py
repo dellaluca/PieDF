@@ -167,6 +167,11 @@ class PdfView(QAbstractScrollArea):
         self.zoom_changed.emit(self._zoom, self._fit)
         self.viewport().update()
 
+    def reload(self) -> None:
+        """Richiede di nuovo le pagine mancanti (il processo di render ha riaperto il documento)."""
+        self._last_request = None
+        self.viewport().update()
+
     def clear(self) -> None:
         self._reset_interaction()
         self._gen += 1
