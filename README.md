@@ -4,7 +4,7 @@ Lettore PDF leggero e portatile per Windows, con firma visiva dei documenti (com
 
 ## Scaricare e usare
 
-1. Scarica lo zip `PieDF-<versione>-win64.zip` e scompattalo dove vuoi (Documenti, Desktop, una chiavetta USB).
+1. Scarica lo zip `PieDF-<versione>-win64.zip` dalle [Release](https://github.com/dellaluca/PieDF/releases) (oppure, per una versione in prova, dagli artifact della run "Build" di una PR) e scompattalo dove vuoi (Documenti, Desktop, una chiavetta USB).
 2. Avvia `PieDF\PieDF.exe`. Non serve installare niente e non si scrive nulla nel registro.
 
 Firme e impostazioni finiscono in `PieDF\data\`, accanto all'exe: copiando la cartella si portano dietro anche quelle. Se la cartella non è scrivibile (per esempio `C:\Program Files\PieDF`) si usa `%APPDATA%\PieDF`.
@@ -12,6 +12,8 @@ Firme e impostazioni finiscono in `PieDF\data\`, accanto all'exe: copiando la ca
 **Aprire i PDF con PieDF**: tasto destro su un PDF → *Apri con* → *Scegli un'altra app* → *Cerca un'altra app in questo PC* e scegli `PieDF.exe`. Spuntando *Usa sempre quest'app* PieDF diventa il lettore predefinito. Si può anche trascinare un PDF sull'exe o nella finestra.
 
 ## Costruire l'exe
+
+Ogni PR lo costruisce e lo prova da sola nel controllo "Build" (lo zip è tra gli artifact della run). A mano:
 
 Su Windows, con Python 3.12:
 
@@ -63,3 +65,13 @@ Lo sviluppo procede a ticket: vedi le [issue](https://github.com/dellaluca/PieDF
 ## Licenza
 
 PieDF usa [PyMuPDF](https://pymupdf.readthedocs.io/), rilasciato sotto AGPL-3.0.
+
+## Pubblicare una versione
+
+1. Aggiorna `__version__` in `piedf/__init__.py` con una PR e uniscila.
+2. Crea e invia il tag corrispondente:
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+3. Il workflow "Release" costruisce l'exe su Windows, lo prova e crea la Release con lo zip allegato. Se il tag non corrisponde a `__version__` si ferma con un errore.

@@ -21,6 +21,7 @@ def data_dir() -> Path:
 
 
 def _writable(directory: Path) -> bool:
+    created = not directory.exists()
     try:
         directory.mkdir(parents=True, exist_ok=True)
         probe = directory / ".write-test"
@@ -28,6 +29,12 @@ def _writable(directory: Path) -> bool:
         probe.unlink()
         return True
     except OSError:
+        # Non lasciare una cartella data/ vuota se poi si usa %APPDATA%.
+        if created:
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
         return False
 
 

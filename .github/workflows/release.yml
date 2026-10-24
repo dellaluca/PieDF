@@ -1,0 +1,61 @@
+# Release: a ogni tag v* (es. v0.1.0) costruisce l'exe su Windows, lo prova
+# e pubblica una GitHub Release con lo zip portatile allegato.
+#
+# Il tag deve corrispondere a __version__ in piedf/__init__.py:
+#   1. aggiorna __version__ con una PR e uniscila;
+#   2. git tag v0.1.0 && git push origin v0.1.0
+name: "Release"
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PYTHONIOENCODING: utf-8
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Il tag corrisponde alla versione
+        run: |
+          versione=$(python -c "import piedf; print(piedf.__version__)")
+          if [ "$TAG" != "v$versione" ]; then
+            echo "::error::Il tag $TAG non corrisponde a __version__ = $versione in piedf/__init__.py"
+            exit 1
+          fi
+
+      - name: Dipendenze
+        run: pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Costruisci l'exe
+        run: python tools/build_exe.py
+
+      - name: Controlla l'exe
+        run: |
+          python tests/make_test_pdfs.py
+          timeout 300 python -u tests/check_exe.py
+
+      - name: Pubblica la release
+        run: |
+          zip=$(ls dist/PieDF-*-win64.zip)
+          gh release create "$TAG" "$zip" --title "PieDF $TAG" --generate-notes

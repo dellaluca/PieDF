@@ -21,7 +21,8 @@ risposta a un needs-info ───┘    legge ticket e CLAUDE.md  ignora  → c
 |---|---|
 | `.github/workflows/claude-orchestratore.yml` | Valuta il ticket e decide |
 | `.github/workflows/claude-esecutore.yml` | Esegue il ticket con il modello scelto (Linux, Qt offscreen) |
-| `.github/workflows/build.yml` | Su ogni branch diverso da `main`: genera i PDF di prova ed esegue tutti i `tests/check_*.py` su **Windows** |
+| `.github/workflows/build.yml` | Su ogni branch diverso da `main`: genera i PDF di prova ed esegue tutti i `tests/check_*.py` su **Windows**, poi costruisce l'exe, lo prova (`check_exe.py`) e allega lo zip alla run |
+| `.github/workflows/release.yml` | Su un tag `v*`: costruisce l'exe e pubblica la GitHub Release con lo zip |
 | `.github/claude/orchestratore.md` | Istruzioni dell'orchestratore |
 | `.github/claude/esecutore.md` | Istruzioni dell'esecutore |
 | `.github/ISSUE_TEMPLATE/task.yml` | Modulo per aprire i ticket |
@@ -83,11 +84,11 @@ Scrivi `@claude` in un commento di un ticket pronto (vedi l'ordine qui sotto). I
 
 ## Ordine dei ticket
 
-`#4 Posizionamento firma` → `#5 Salvataggio` → `#8 Exe portatile` (la parte di release automatica la fa la sessione locale). `#6` e `#7` dopo la prima versione.
+Prima versione fatta: #4 → #5 → #8 → #13 (build dell'exe nella CI e release, fatto in sessione locale). Dopo: #6 pannello laterale, #7 testo e data, #14 ricerca, #15 selezione del testo.
 
 ## Costi e limiti
 
 - **Turni per esecuzione:** Haiku 60, Sonnet 140, Opus 200 (in `claude-esecutore.yml`).
-- **Minuti di Actions:** repo privato, piano Free = 2000 minuti al mese. Il build gira su Windows, che conta doppio: circa 8 minuti per ogni push su un branch. L'esecutore gira su Linux.
+- **Minuti di Actions:** repo privato, piano Free = 2000 minuti al mese. Il build gira su Windows, che conta doppio: circa 12 minuti per ogni push su un branch (controlli + build e prova dell'exe). L'esecutore gira su Linux.
 - **Uso di Claude:** ogni ticket consuma una valutazione di Opus più un'esecuzione, sui limiti del tuo abbonamento.
 - **Scadenze:** quando `CLAUDE_CODE_OAUTH_TOKEN` scade, rigeneralo e aggiorna il secret.
