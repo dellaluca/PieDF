@@ -1,0 +1,25 @@
+name: Task di sviluppo
+description: Una funzione, una correzione o una modifica a PieDF. Claude la prende in carico appena la apri.
+body:
+  - type: textarea
+    id: descrizione
+    attributes:
+      label: Cosa serve
+      description: Il lavoro da fare, dal punto di vista di chi usa PieDF.
+    validations:
+      required: true
+  - type: input
+    id: dipende
+    attributes:
+      label: Dipende da
+      description: "Ticket che devono essere chiusi prima, es. #4"
+  - type: textarea
+    id: fatto-quando
+    attributes:
+      label: Fatto quando
+      description: Come capire che è finito. Diventeranno i controlli in tests/.
+  - type: textarea
+    id: note
+    attributes:
+      label: Note tecniche
+      description: File da toccare, vincoli, idee. Facoltativo.

@@ -1,0 +1,106 @@
+# Orchestratore: legge un ticket, decide se è chiaro e, se sì, sceglie il
+# modello e avvia l'esecutore. Le istruzioni sono in .github/claude/orchestratore.md.
+name: "Claude · orchestratore"
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      numero:
+        description: "Numero della issue o della PR"
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: claude-orchestratore-${{ github.event.issue.number || inputs.numero }}
+  cancel-in-progress: false
+
+jobs:
+  smista:
+    # Solo chi ha accesso in scrittura al repo può far partire Claude.
+    # Sui commenti parte se c'è "@claude" o se il ticket aspettava una risposta.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+          github.event_name == 'issues' && github.event.issue.author_association || github.event.comment.author_association) &&
+        !contains(github.event.issue.labels.*.name, 'claude:skip') &&
+        (
+          github.event_name == 'issues' ||
+          contains(github.event.comment.body, '@claude') ||
+          contains(github.event.issue.labels.*.name, 'needs-info')
+        )
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NUMERO: ${{ github.event.issue.number || inputs.numero }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Valuta il ticket
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          # I workflow si avviano tra loro come bot github-actions.
+          allowed_bots: github-actions,github-actions[bot]
+          prompt: |
+            Segui le istruzioni in .github/claude/orchestratore.md.
+            Ticket da valutare: #${{ env.NUMERO }} nel repo ${{ github.repository }}.
+          claude_args: >-
+            --model claude-opus-5-5
+            --max-turns 15
+            --allowedTools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*)"
+            --json-schema '{"type":"object","properties":{"azione":{"type":"string","enum":["esegui","chiedi","ignora"]},"modello":{"type":"string","enum":["haiku","sonnet","opus"]},"messaggio":{"type":"string"}},"required":["azione","messaggio"]}'
+
+      - name: Applica la decisione
+        env:
+          DECISIONE: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          azione=$(jq -r '.azione' <<<"$DECISIONE")
+          modello=$(jq -r '.modello // "sonnet"' <<<"$DECISIONE")
+          jq -r '.messaggio' <<<"$DECISIONE" > messaggio.md
+          echo "Decisione: $azione ($modello)"
+
+          togli() { gh issue edit "$NUMERO" --remove-label "$1" >/dev/null 2>&1 || true; }
+
+          case "$azione" in
+            chiedi)
+              togli claude:in-corso
+              gh issue edit "$NUMERO" --add-label needs-info
+              gh issue comment "$NUMERO" --body-file messaggio.md
+              ;;
+            esegui)
+              for l in needs-info claude:errore claude:fatto claude:haiku claude:sonnet claude:opus; do togli "$l"; done
+              gh issue edit "$NUMERO" --add-label "claude:in-corso,claude:$modello"
+              gh issue comment "$NUMERO" --body-file messaggio.md
+              gh workflow run claude-esecutore.yml --ref main -f numero="$NUMERO" -f modello="$modello"
+              ;;
+            ignora)
+              gh issue edit "$NUMERO" --add-label claude:skip
+              if [ -s messaggio.md ]; then gh issue comment "$NUMERO" --body-file messaggio.md; fi
+              ;;
+            *)
+              echo "Decisione non valida: $DECISIONE" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Segnala l'errore
+        if: failure()
+        run: |
+          gh issue edit "$NUMERO" --add-label claude:errore
+          gh issue comment "$NUMERO" --body "⚠️ L'orchestratore non è riuscito a valutare il ticket: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          Per riprovare scrivi un commento con @claude."

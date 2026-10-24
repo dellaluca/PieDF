@@ -1,0 +1,115 @@
+# Esecutore: lavora su un ticket già valutato dall'orchestratore, con il
+# modello che l'orchestratore ha scelto. Apre sempre una PR, mai push su main.
+# Le istruzioni sono in .github/claude/esecutore.md.
+#
+# Gira su Linux: Qt in modalità offscreen basta per i controlli in tests/.
+# Il controllo vero su Windows lo fa build.yml sulla PR.
+name: "Claude · esecutore"
+
+on:
+  workflow_dispatch:
+    inputs:
+      numero:
+        description: "Numero della issue o della PR"
+        required: true
+      modello:
+        description: "Modello da usare"
+        type: choice
+        options: [haiku, sonnet, opus]
+        default: sonnet
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: claude-esecutore-${{ inputs.numero }}
+  cancel-in-progress: false
+
+jobs:
+  esegui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      NUMERO: ${{ inputs.numero }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Librerie di sistema per Qt offscreen
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+
+      - name: Dipendenze Python
+        run: pip install -r requirements.txt
+
+      - name: Scegli il modello
+        id: modello
+        run: |
+          # Il limite di turni cresce con il modello: Opus riceve i lavori più grandi.
+          case "${{ inputs.modello }}" in
+            haiku) echo "id=claude-haiku-5-5"  >> "$GITHUB_OUTPUT"; echo "turni=60"  >> "$GITHUB_OUTPUT" ;;
+            opus)  echo "id=claude-opus-5-5"   >> "$GITHUB_OUTPUT"; echo "turni=200" >> "$GITHUB_OUTPUT" ;;
+            *)     echo "id=claude-sonnet-5-5" >> "$GITHUB_OUTPUT"; echo "turni=140" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Esegui il ticket
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          # I workflow si avviano tra loro come bot github-actions.
+          allowed_bots: github-actions,github-actions[bot]
+          prompt: |
+            Segui le istruzioni in .github/claude/esecutore.md.
+            Ticket da eseguire: #${{ env.NUMERO }} nel repo ${{ github.repository }}.
+          claude_args: >-
+            --model ${{ steps.modello.outputs.id }}
+            --max-turns ${{ steps.modello.outputs.turni }}
+            --allowedTools "Read,Write,Edit,Glob,Grep,WebFetch,Bash(git:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh issue edit:*),Bash(gh pr:*),Bash(python:*),Bash(python3:*),Bash(pip:*),Bash(timeout:*),Bash(ls:*),Bash(mkdir:*),Bash(mv:*),Bash(cp:*)"
+            --disallowedTools "Bash(gh pr merge:*),Bash(git push origin main*),Bash(git push origin HEAD:main*),Bash(git push --force*),Bash(git push -f*)"
+
+      # Le PR aperte con il GITHUB_TOKEN non fanno partire il workflow di build:
+      # lo avviamo qui sul branch della PR, così il controllo compare nella PR.
+      - name: Avvia il build della PR
+        if: always()
+        run: |
+          if gh pr view "$NUMERO" --json headRefName >/dev/null 2>&1; then
+            branch=$(gh pr view "$NUMERO" --json headRefName --jq .headRefName)
+          else
+            branch=$(gh pr list --state open --json headRefName,body \
+              --jq "[.[] | select(.body | test(\"(?i)closes #$NUMERO([^0-9]|\$)\"))][0].headRefName // empty")
+          fi
+          if [ -n "$branch" ]; then
+            echo "Build su $branch"
+            gh workflow run build.yml --ref "$branch"
+          else
+            echo "Nessuna PR aperta per #$NUMERO"
+          fi
+
+      - name: Aggiorna le etichette
+        if: always()
+        run: |
+          gh issue edit "$NUMERO" --remove-label claude:in-corso >/dev/null 2>&1 || true
+          if [ "${{ job.status }}" = "success" ]; then
+            # Se l'esecutore si è fermato per chiedere informazioni, il ticket non è fatto.
+            if ! gh issue view "$NUMERO" --json labels --jq '.labels[].name' | grep -qx needs-info; then
+              gh issue edit "$NUMERO" --add-label claude:fatto
+            fi
+          else
+            gh issue edit "$NUMERO" --add-label claude:errore
+            gh issue comment "$NUMERO" --body "⚠️ L'esecuzione non è andata a buon fine: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          Per riprovare scrivi un commento con @claude."
+          fi
