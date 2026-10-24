@@ -149,7 +149,9 @@ def main():
         shutil.rmtree(d, ignore_errors=True)
     shutil.copytree(EXE.parent, ro / "PieDF", ignore=shutil.ignore_patterns("data"))
     appdata.mkdir(parents=True)
-    denied = subprocess.run(["icacls", str(ro / "PieDF"), "/deny", f"{user}:(OI)(CI)(W,D)"],
+    # Solo creazione di file e cartelle (WD, AD): la "W" generica toglie anche SYNCHRONIZE
+    # e Windows non riesce più nemmeno ad avviare l'exe (Access is denied).
+    denied = subprocess.run(["icacls", str(ro / "PieDF"), "/deny", f"{user}:(OI)(CI)(WD,AD)"],
                             capture_output=True, text=True)
     try:
         if denied.returncode != 0 or _can_write(ro / "PieDF"):
