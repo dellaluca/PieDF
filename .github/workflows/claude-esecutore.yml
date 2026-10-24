@@ -66,6 +66,7 @@ jobs:
           esac
 
       - name: Esegui il ticket
+        id: claude
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -80,6 +81,48 @@ jobs:
             --max-turns ${{ steps.modello.outputs.turni }}
             --allowedTools "Read,Write,Edit,Glob,Grep,WebFetch,Bash(git:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh issue edit:*),Bash(gh pr:*),Bash(python:*),Bash(python3:*),Bash(pip:*),Bash(timeout:*),Bash(ls:*),Bash(mkdir:*),Bash(mv:*),Bash(cp:*)"
             --disallowedTools "Bash(gh pr merge:*),Bash(git push origin main*),Bash(git push origin HEAD:main*),Bash(git push --force*),Bash(git push -f*)"
+
+      # La trascrizione completa della sessione (l'output nel log è nascosto):
+      # serve a capire perché un'esecuzione non ha prodotto la PR.
+      - name: Salva la trascrizione
+        if: always() && steps.claude.outputs.execution_file != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: trascrizione-${{ env.NUMERO }}-${{ github.run_id }}
+          path: ${{ steps.claude.outputs.execution_file }}
+          retention-days: 14
+
+      # Rete di sicurezza: il runner si butta via a fine job. Se la sessione ha
+      # lasciato commit o modifiche su un branch senza pubblicarlo (#21 ha perso
+      # così 37 minuti di lavoro), li pubblichiamo e apriamo una PR in bozza.
+      - name: Pubblica il lavoro rimasto in locale
+        if: always()
+        run: |
+          branch=$(git rev-parse --abbrev-ref HEAD)
+          if [ "$branch" = "main" ] || [ "$branch" = "HEAD" ]; then
+            if [ -z "$(git status --porcelain)" ]; then echo "Niente da salvare"; exit 0; fi
+            branch="claude/salvataggio-$NUMERO-${{ github.run_id }}"
+            git switch -c "$branch"
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain -- . ':!.github/workflows')" ]; then
+            git add -A -- . ':!.github/workflows'
+            git commit -q -m "Lavoro non salvato dalla sessione (salvataggio automatico)"
+          fi
+          if [ -z "$(git log --oneline origin/main..HEAD)" ]; then echo "Nessun commit nuovo"; exit 0; fi
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$branch" 2>/dev/null)" ]; then
+            echo "$branch è già pubblicato"
+          else
+            git push -u origin "$branch"
+          fi
+          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')" ]; then
+            gh pr create --draft --base main --head "$branch" \
+              --title "Bozza da salvataggio automatico per #$NUMERO" \
+              --body "La sessione dell'esecutore è finita senza aprire la PR: qui c'è il lavoro rimasto sul runner, da controllare. Esecuzione: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Closes #$NUMERO"
+          fi
 
       # Le PR aperte con il GITHUB_TOKEN non fanno partire il workflow di build:
       # lo avviamo qui sul branch della PR, così il controllo compare nella PR.
@@ -103,11 +146,22 @@ jobs:
         if: always()
         run: |
           gh issue edit "$NUMERO" --remove-label claude:in-corso >/dev/null 2>&1 || true
-          if [ "${{ job.status }}" = "success" ]; then
-            # Se l'esecutore si è fermato per chiedere informazioni, il ticket non è fatto.
-            if ! gh issue view "$NUMERO" --json labels --jq '.labels[].name' | grep -qx needs-info; then
-              gh issue edit "$NUMERO" --add-label claude:fatto
-            fi
+          # "Fatto" solo se c'è una PR (aperta dalla sessione o dal salvataggio qui sopra).
+          if gh pr view "$NUMERO" --json number >/dev/null 2>&1; then
+            pr=$NUMERO
+          else
+            pr=$(gh pr list --state open --json number,body \
+              --jq "[.[] | select(.body | test(\"(?i)closes #$NUMERO([^0-9]|\$)\"))][0].number // empty")
+          fi
+          if gh issue view "$NUMERO" --json labels --jq '.labels[].name' | grep -qx needs-info; then
+            # L'esecutore si è fermato per chiedere informazioni: il ticket non è fatto.
+            true
+          elif [ "${{ job.status }}" = "success" ] && [ -n "$pr" ]; then
+            gh issue edit "$NUMERO" --add-label claude:fatto
+          elif [ "${{ job.status }}" = "success" ]; then
+            gh issue edit "$NUMERO" --add-label claude:errore
+            gh issue comment "$NUMERO" --body "⚠️ La sessione è finita senza PR e senza lavoro da salvare: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} (la trascrizione è tra gli artifact).
+          Per riprovare scrivi un commento con @claude."
           else
             gh issue edit "$NUMERO" --add-label claude:errore
             gh issue comment "$NUMERO" --body "⚠️ L'esecuzione non è andata a buon fine: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
