@@ -160,7 +160,7 @@ def main():
           and not {"non_pdf.pdf", "danneggiato.pdf", "inesistente.pdf"} & set(recent) and len(recent) == len(set(recent)), str(recent))
     w._fill_recent_menu()
     labels = [a.text() for a in w._recent_menu.actions()]
-    check("menu recenti", labels[0].endswith("semplice.pdf") and labels[-1] == "Svuota elenco", str(labels[:2]))
+    check("menu recenti", labels[0].endswith("semplice.pdf") and labels[-2:] == ["Svuota elenco", "Dimentica le posizioni"], str(labels[:2]))
 
     w.act_close.trigger()
     check("chiudi documento", w._path is None and w.windowTitle() == "PieDF" and not w.act_zoom_in.isEnabled() and v.page_count == 0)

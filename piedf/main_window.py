@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from piedf import paths
 from piedf.document import OpenError, PasswordRequired, open_document
 from piedf.placements import Placements
+from piedf.positions import Positions
 from piedf.renderer import Renderer
 from piedf.signature_dialog import SignatureDialog
 from piedf.signature_manager import SignatureManager, thumbnail_pixmap
@@ -30,6 +31,8 @@ from piedf.viewer import FitMode, PdfView
 from piedf.writer import SaveError, has_digital_signatures, save_with_signatures
 
 MAX_RECENT = 10
+POSITION_SAVE_MS = 30_000
+FIT_NAMES = {FitMode.WIDTH: "width", FitMode.PAGE: "page", FitMode.NONE: None}
 FIT_LABELS = {FitMode.WIDTH: "Adatta larghezza", FitMode.PAGE: "Adatta pagina"}
 ZOOM_PRESETS = [50, 75, 100, 125, 150, 200, 300, 400]
 MENU_THUMB = QSize(160, 52)
@@ -60,6 +63,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self._settings = paths.settings()
+        self._positions = Positions(paths.data_dir() / "posizioni.json")
         self.signatures = SignatureStore()
         self.placements = Placements(self)
         self.placements.changed.connect(self._update_title)
@@ -77,6 +81,11 @@ class MainWindow(QMainWindow):
         self.view.placing_changed.connect(self._on_placing_changed)
         self.view.set_placements(self.placements)
         self.setCentralWidget(self.view)
+
+        # Se il programma si blocca, la posizione di lettura si perde al massimo per questo intervallo.
+        self._position_timer = QTimer(self)
+        self._position_timer.timeout.connect(lambda: self._save_position(force=False))
+        self._position_timer.start(POSITION_SAVE_MS)
 
         self._build_actions()
         self._build_menu()
@@ -271,6 +280,7 @@ class MainWindow(QMainWindow):
 
         if not self._confirm_discard():
             return False
+        self._save_position()
         self.placements.clear()
         self._gen += 1
         self._path = path
@@ -283,6 +293,7 @@ class MainWindow(QMainWindow):
         self._update_title()
         self._update_enabled()
         self._add_recent(path)
+        self._restore_position(path, len(doc.page_sizes))
         self.view.setFocus()
         if doc.repaired:
             self.statusBar().showMessage("Il file era danneggiato ed è stato riparato per la lettura.", 10000)
@@ -293,6 +304,7 @@ class MainWindow(QMainWindow):
     def close_document(self) -> bool:
         if not self._confirm_discard():
             return False
+        self._save_position()
         self.placements.clear()
         self._path = None
         self._password = None
@@ -324,6 +336,32 @@ class MainWindow(QMainWindow):
         if answer == Button.Save:
             return self.save()
         return answer == Button.Discard
+
+    # --- Posizione di lettura ---------------------------------------------------------
+
+    def _save_position(self, force: bool = True) -> None:
+        if self._path is None or not self.view.page_count:
+            return
+        page, y = self.view.scroll_position()
+        fit, zoom = FIT_NAMES[self.view.fit_mode], self.view.zoom
+        if force or not self._positions.same(self._path, page, y, fit, zoom):
+            self._positions.set(self._path, page, y, fit, zoom)
+
+    def _restore_position(self, path: str, page_count: int) -> None:
+        entry = self._positions.get(path)
+        if entry is None:
+            return
+        page, y = entry["pagina"], entry["y"]
+        if page >= page_count:
+            page, y = page_count - 1, 0.0
+        self.view.go_to_page(page)  # Adatta pagina misura la pagina corrente
+        if entry["fit"] == "width":
+            self.view.set_fit_mode(FitMode.WIDTH)
+        elif entry["fit"] == "page":
+            self.view.set_fit_mode(FitMode.PAGE)
+        else:
+            self.view.set_zoom(entry["zoom"])
+        self.view.set_scroll_position(page, y)
 
     # --- Salvataggio ------------------------------------------------------------------
 
@@ -533,6 +571,7 @@ class MainWindow(QMainWindow):
         else:
             menu.addSeparator()
             menu.addAction("Svuota elenco", lambda: self._settings.setValue("recent_files", []))
+        menu.addAction("Dimentica le posizioni", self._positions.clear)
 
     # --- Chiusura ---------------------------------------------------------------------
 
@@ -540,5 +579,6 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard():
             event.ignore()
             return
+        self._save_position()
         self._renderer.shutdown()
         super().closeEvent(event)
