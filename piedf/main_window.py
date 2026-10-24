@@ -1,8 +1,8 @@
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -37,6 +37,9 @@ FIT_LABELS = {FitMode.WIDTH: "Adatta larghezza", FitMode.PAGE: "Adatta pagina"}
 ZOOM_PRESETS = [50, 75, 100, 125, 150, 200, 300, 400]
 MENU_THUMB = QSize(160, 52)
 PLACING_HINT = "Clic per posizionare la firma · Esc per annullare"
+MAX_HISTORY = 50
+# Gli unici link esterni che si seguono: niente file:, launch, javascript: o altri PDF.
+SAFE_SCHEMES = ("http", "https", "mailto")
 
 
 class ThumbnailItem(QLabel):
@@ -72,6 +75,9 @@ class MainWindow(QMainWindow):
         self._password: str | None = None
         self._save_path: str | None = None  # dove scrive "Salva"; None finché non si è salvato
         self._gen = 0
+        # Cronologia dei link interni: posizioni (pagina, y in punti) come scroll_position.
+        self._back: list[tuple[int, float]] = []
+        self._forward: list[tuple[int, float]] = []
 
         self._renderer = Renderer(self)
         self._renderer.failed.connect(self._on_render_failed)
@@ -79,6 +85,8 @@ class MainWindow(QMainWindow):
         self.view.page_changed.connect(self._on_page_changed)
         self.view.zoom_changed.connect(self._on_zoom_changed)
         self.view.placing_changed.connect(self._on_placing_changed)
+        self.view.link_goto.connect(self._follow_link)
+        self.view.link_uri.connect(self._open_uri)
         self.view.set_placements(self.placements)
         self.setCentralWidget(self.view)
 
@@ -126,6 +134,8 @@ class MainWindow(QMainWindow):
             "Pagina &successiva", lambda: self.view.go_to_page(self.view.current_page + 1), ["Ctrl+PgDown"]
         )
         self.act_goto = self._action("&Vai a pagina…", self._focus_page_box, ["Ctrl+G"])
+        self.act_back = self._action("I&ndietro", self.go_back, ["Alt+Left"])
+        self.act_forward = self._action("A&vanti", self.go_forward, ["Alt+Right"])
 
         # Il testo segue l'ultimo comando: "Annulla spostamento firma".
         stack = self.placements.undo_stack
@@ -167,6 +177,9 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         for action in (self.act_prev, self.act_next, self.act_goto):
             view_menu.addAction(action)
+        view_menu.addSeparator()
+        view_menu.addAction(self.act_back)
+        view_menu.addAction(self.act_forward)
 
         sign_menu = self.menuBar().addMenu("F&irma")
         sign_menu.addAction("Crea &firma…", lambda: self.create_signature(Kind.SIGNATURE))
@@ -235,6 +248,8 @@ class MainWindow(QMainWindow):
         for item in self._doc_actions + self._doc_widgets:
             item.setEnabled(has_doc)
         self.act_save.setEnabled(has_doc and self.placements.modified)
+        self.act_back.setEnabled(has_doc and bool(self._back))
+        self.act_forward.setEnabled(has_doc and bool(self._forward))
 
     def _update_title(self) -> None:
         if self._path:
@@ -282,6 +297,7 @@ class MainWindow(QMainWindow):
             return False
         self._save_position()
         self.placements.clear()
+        self._clear_history()
         self._gen += 1
         self._path = path
         self._password = doc.password
@@ -306,6 +322,7 @@ class MainWindow(QMainWindow):
             return False
         self._save_position()
         self.placements.clear()
+        self._clear_history()
         self._path = None
         self._password = None
         self._save_path = None
@@ -362,6 +379,63 @@ class MainWindow(QMainWindow):
         else:
             self.view.set_zoom(entry["zoom"])
         self.view.set_scroll_position(page, y)
+
+    # --- Link e cronologia -----------------------------------------------------------
+
+    def _follow_link(self, page: int, y: float) -> None:
+        self._back = (self._back + [self.view.scroll_position()])[-MAX_HISTORY:]
+        self._forward = []
+        self.view.set_scroll_position(page, y)
+        self._update_enabled()
+
+    def go_back(self) -> None:
+        self._step_history(self._back, self._forward)
+
+    def go_forward(self) -> None:
+        self._step_history(self._forward, self._back)
+
+    def _step_history(self, source: list, dest: list) -> None:
+        if not source or self._path is None:
+            return
+        dest.append(self.view.scroll_position())
+        del dest[:-MAX_HISTORY]
+        self.view.set_scroll_position(*source.pop())
+        self._update_enabled()
+
+    def _clear_history(self) -> None:
+        self._back.clear()
+        self._forward.clear()
+
+    def _open_uri(self, uri: str) -> None:
+        url = QUrl(uri, QUrl.ParsingMode.StrictMode)
+        scheme = url.scheme().lower()
+        ok = url.isValid() and scheme in SAFE_SCHEMES and bool(url.path() if scheme == "mailto" else url.host())
+        if not ok:
+            self.statusBar().showMessage("Link non supportato per sicurezza", 10000)
+            return
+        # L'indirizzo per intero e codificato (niente caratteri simili Unicode): è quello che si apre
+        # davvero, che può essere diverso dal testo visibile nel PDF.
+        address = bytes(url.toEncoded()).decode("ascii")
+        Button = QMessageBox.StandardButton
+        box = QMessageBox(
+            QMessageBox.Icon.Question, "Link esterno",
+            f"Aprire questo indirizzo nel browser?\n\n{address}",
+            Button.Open | Button.Cancel, self,
+        )
+        box.button(Button.Open).setText("Apri")
+        box.button(Button.Cancel).setText("Annulla")
+        box.setDefaultButton(Button.Cancel)
+        if box.exec() == Button.Open:
+            QDesktopServices.openUrl(url)
+
+    def mousePressEvent(self, event) -> None:
+        # Tasti laterali del mouse, anche sopra la vista (che non li usa e li lascia passare).
+        if event.button() == Qt.MouseButton.BackButton:
+            self.go_back()
+        elif event.button() == Qt.MouseButton.ForwardButton:
+            self.go_forward()
+        else:
+            super().mousePressEvent(event)
 
     # --- Salvataggio ------------------------------------------------------------------
 
