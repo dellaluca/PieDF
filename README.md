@@ -14,12 +14,13 @@ python -m piedf            # finestra vuota
 python -m piedf file.pdf   # apre direttamente un file
 ```
 
-Controllo automatico del viewer su PDF di prova (semplice, 350 pagine, cifrato, scansionato, danneggiati…):
+Controlli automatici del viewer e delle firme, su PDF di prova (semplice, 350 pagine, cifrato, scansionato, danneggiati…):
 
 ```bash
 python tests/make_test_pdfs.py
 set QT_QPA_PLATFORM=offscreen
 python tests/check_viewer.py
+python tests/check_signatures.py
 ```
 
 ## Scorciatoie
