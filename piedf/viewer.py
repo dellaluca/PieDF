@@ -27,7 +27,7 @@ PAGE_BORDER = QColor("#3c3f41")
 SELECTION = QColor("#1a73e8")
 HANDLE = 8  # lato delle maniglie, px logici
 PREVIEW_OPACITY = 0.6
-FIELD_HIGHLIGHT = QColor(204, 215, 255, 150)  # azzurro semitrasparente, come in Acrobat
+FIELD_HIGHLIGHT = QColor(214, 224, 255)  # azzurro chiaro, come in Acrobat (in modalità Multiply)
 FIELD_FONT_PT = 12.0  # font dell'editor per i campi a dimensione automatica (massimo)
 ALIGNMENTS = [Qt.AlignmentFlag.AlignLeft, Qt.AlignmentFlag.AlignHCenter, Qt.AlignmentFlag.AlignRight]
 # Angoli in senso orario da in alto a sinistra: maniglie e cursori corrispondenti.
@@ -735,10 +735,13 @@ class PdfView(QAbstractScrollArea):
     def _paint_fields(self, painter: QPainter) -> None:
         visible = self._visible_range()
         if self._highlight:
+            # Moltiplicato: il bianco diventa azzurro, il testo del campo resta scuro.
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Multiply)
             for page in visible:
                 for f in self._forms.on_page(page):
                     if f.fillable:
                         painter.fillRect(self.page_rect_to_viewport(page, self._field_rect(f)), FIELD_HIGHLIGHT)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         focus = self._focus_field
         if focus is not None and self._editor is None and focus.page in visible:
             pen = QPen(SELECTION, 1, Qt.PenStyle.DotLine)
@@ -902,7 +905,8 @@ class PdfView(QAbstractScrollArea):
         self.viewport().update()
 
     def eventFilter(self, obj, event) -> bool:
-        if self._editor is not None and event.type() == QEvent.Type.KeyPress:
+        # La scroll area filtra già i suoi eventi anche durante __init__: `_editor` può non esserci ancora.
+        if event.type() == QEvent.Type.KeyPress and getattr(self, "_editor", None) is not None:
             key, mods = event.key(), event.modifiers()
             if key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
                 back = key == Qt.Key.Key_Backtab or bool(mods & Qt.KeyboardModifier.ShiftModifier)

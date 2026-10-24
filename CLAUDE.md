@@ -18,23 +18,25 @@ Lettore PDF desktop leggero e portatile con firma visiva stile Acrobat "Firma".
 - **Coordinate delle firme piazzate**: `Placement.rect` è in punti PDF, nello spazio della pagina come si vede (dopo /Rotate), origine in alto a sinistra: lo stesso di `page.rect` in PyMuPDF e di `PdfDocument.page_sizes`. Le conversioni verso lo schermo sono in `PdfView` (`page_at`, `to_page_point`, `page_rect_to_viewport`). I posizionamenti stanno in `Placements` (modello senza widget, con `QUndoStack`: "modificato" = stack non pulito); si svuotano aprendo o chiudendo un documento.
 - **Posizione di lettura** (`positions.py`): `posizioni.json` in `data_dir()`, non `settings.ini` (con molti file l'INI cresce e QSettings lo riscrive tutto a ogni modifica). Chiave = percorso `normcase(abspath)`, massimo 500 file (via i meno recenti), scrittura atomica, JSON illeggibile = vuoto. `y` è in punti PDF dentro la pagina (`PdfView.scroll_position` / `set_scroll_position`), così regge zoom e finestra diversi. Salvata a ogni chiusura del documento (altro file, Ctrl+W, uscita) e ogni 30 s; ripristinata in `open_file` dopo `set_document`. Con Adatta larghezza/pagina il ridimensionamento della finestra mantiene la posizione.
 - **Salvataggio** (`writer.py`): ogni firma è un `page.insert_image(rect * page.derotation_matrix, rotate=page.rotation, overlay=True)` (formula provata su 0/90/180/270°); lo stesso PNG si scrive una volta sola (riuso dell'xref). Su un file nuovo: salvataggio completo su `<dest>.piedf-tmp` e poi `os.replace`, mai un file a metà. Sovrascrivendo lo stesso file, se si può, salvataggio incrementale (con `deflate=True`, altrimenti il PNG finisce non compresso). Sempre `encryption=PDF_ENCRYPT_KEEP`: un PDF cifrato resta cifrato con le stesse password (anche l'owner). Prima di sovrascrivere il file aperto, `Renderer.close(gen, wait=True)` aspetta che il processo di render lo rilasci (su Windows altrimenti è bloccato). Dopo il salvataggio la GUI riapre il file salvato alla stessa pagina e zoom e svuota i posizionamenti: le firme non sono più modificabili. Il primo "Salva" di un documento propone `<nome>_firmato.pdf`.
+- **Moduli PDF** (`forms.py`, `document.FormField`): i campi si leggono in `open_document` (con XFA nessun campo, solo il messaggio). Rettangolo "come si vede" = `widget.rect * page.rotation_matrix`, lo stesso spazio di `Placement.rect`. Valori sempre testo: caselle e radio = stato acceso o `"Off"`, per i radio il valore è del gruppo (`FormField.group` = xref del campo padre; i widget dello stesso gruppo cambiano insieme). `FormValues` usa lo **stesso `QUndoStack`** di `Placements` (un passo per ogni modifica confermata). Aspetto vero senza salvare: il messaggio `("field", gen, page, xref, value)` cambia il documento **in memoria** del processo di render, che risponde `("field", gen, page)`; la vista marca vecchio il render della pagina e lo richiede (i valori si rimandano se il processo riapre il file). `document.set_field_value` (usato da worker e `writer.py`) passa da `pdf_set_field_value` di MuPDF e non da `Widget.update()`, che riscriverebbe il font del campo con Helvetica; caselle e radio cambiano `/AS` dei widget e `/V` del campo. Il clic su un campo compilabile ha la precedenza sulle firme piazzate (non sulle maniglie della firma selezionata né durante il posizionamento); campi firma, pulsanti e sola lettura si ignorano, anche col Tab.
 
 ## Struttura
 
 - `piedf/__main__.py` – entry point (`python -m piedf [file.pdf]`)
 - `piedf/app.py` – crea `QApplication` e la finestra, gestisce gli argomenti
-- `piedf/main_window.py` – finestra principale: menu, toolbar, password, drag & drop, file recenti
-- `piedf/viewer.py` – `PdfView`: scorrimento continuo, zoom, cache delle pagine visibili
+- `piedf/main_window.py` – finestra principale: menu, toolbar, barra dei moduli (Evidenzia campi), password, drag & drop, file recenti
+- `piedf/viewer.py` – `PdfView`: scorrimento continuo, zoom, cache delle pagine visibili, evidenziazione ed editor sul posto dei campi
 - `piedf/renderer.py` – lato GUI del processo di render (segnali Qt, riavvio se il processo muore)
 - `piedf/render_worker.py` – processo di render (solo PyMuPDF), scarta le richieste vecchie
-- `piedf/document.py` – apertura del PDF: password, file danneggiati, dimensioni pagine
+- `piedf/document.py` – apertura del PDF: password, file danneggiati, dimensioni pagine, campi modulo (`FormField`, `set_field_value`)
 - `piedf/paths.py` – cartella dati portatile e `settings.ini`
 - `piedf/signatures.py` – archivio firme (`<dati>/firme/*.png`, tipo nel prefisso `firma_` / `iniziali_`) e trattamento immagini (sfondo trasparente, ritaglio)
 - `piedf/signature_dialog.py` – dialog "Crea firma": Disegna / Scrivi / Immagine
 - `piedf/signature_manager.py` – dialog "Le mie firme": elenco, nuova, elimina
+- `piedf/forms.py` – valori dei campi modulo (`FormValues`), ordine del Tab, comandi annulla/ripeti
 - `piedf/placements.py` – firme piazzate sul documento (`Placement`, `Placements`), comandi annulla/ripeti, dimensione predefinita
 - `piedf/positions.py` – posizione di lettura per file (`posizioni.json`, senza Qt)
-- `piedf/writer.py` – scrittura delle firme nel PDF (`save_with_signatures`, `SaveError`), controllo firme digitali esistenti
+- `piedf/writer.py` – scrittura delle firme e dei campi compilati nel PDF (`save_with_signatures`, `SaveError`), controllo firme digitali esistenti
 - `piedf/assets/` – icona e risorse incluse nell'exe
 - `piedf.spec` – spec di PyInstaller (onedir; `-- --onefile` per il confronto), esclusioni, icona, informazioni di versione
 - `tools/build_exe.py` – lancia PyInstaller, crea lo zip e stampa le dimensioni; `requirements-build.txt` – solo per costruire (PyInstaller)
