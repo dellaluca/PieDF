@@ -13,3 +13,6 @@ data/
 
 .vscode/
 .idea/
+
+# Output dei test (PDF generati, screenshot)
+tests/out/
