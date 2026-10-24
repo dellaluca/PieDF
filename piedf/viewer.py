@@ -207,6 +207,24 @@ class PdfView(QAbstractScrollArea):
         self.verticalScrollBar().setValue(self._tops[index] - MARGIN)
         self._update_current_page(force=index)
 
+    def scroll_position(self) -> tuple[int, float]:
+        """Pagina e distanza (punti PDF) dal suo bordo alto al punto in cima alla vista, margine escluso."""
+        if not self._sizes:
+            return 0, 0.0
+        y = self.verticalScrollBar().value() + MARGIN
+        page = max(0, min(bisect.bisect_right(self._tops, y) - 1, len(self._sizes) - 1))
+        return page, (y - self._tops[page]) / self._scale()
+
+    def set_scroll_position(self, page: int, y_pt: float) -> None:
+        """Inverso di `scroll_position`; una pagina oltre la fine vale l'ultima, in cima."""
+        if not self._sizes:
+            return
+        if page >= len(self._sizes):
+            page, y_pt = len(self._sizes) - 1, 0.0
+        page = max(0, page)
+        self.verticalScrollBar().setValue(round(self._tops[page] + y_pt * self._scale()) - MARGIN)
+        self._update_current_page()
+
     # --- Layout -----------------------------------------------------------------------
 
     def _scale(self) -> float:
@@ -387,7 +405,9 @@ class PdfView(QAbstractScrollArea):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         if self._sizes and self._fit != FitMode.NONE:
+            page, y_pt = self.scroll_position()
             self._apply_fit()
+            self.set_scroll_position(page, y_pt)
             self.zoom_changed.emit(self._zoom, self._fit)
         else:
             self._update_scrollbars()
