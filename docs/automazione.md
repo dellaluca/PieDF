@@ -29,6 +29,8 @@ risposta a un needs-info ───┘    legge ticket e CLAUDE.md  ignora  → c
 
 Le PR non si uniscono mai da sole: le rivedi e le unisci tu.
 
+Se la sessione finisce lasciando commit o modifiche non pubblicati sul runner, il workflow li pubblica lui e apre una PR in bozza "Bozza da salvataggio automatico per #N", da controllare. La trascrizione completa di ogni sessione è tra gli artifact dell'esecuzione (14 giorni): serve a capire cosa è andato storto, perché nel log l'output di Claude è nascosto.
+
 ### Etichette
 
 | Etichetta | Significato |
@@ -36,8 +38,8 @@ Le PR non si uniscono mai da sole: le rivedi e le unisci tu.
 | `needs-info` | Claude ha fatto delle domande nel ticket. Quando rispondi riparte da solo. |
 | `claude:in-corso` | L'esecutore sta lavorando |
 | `claude:haiku` / `claude:sonnet` / `claude:opus` | Modello scelto dall'orchestratore |
-| `claude:fatto` | PR aperta |
-| `claude:errore` | Qualcosa è andato storto: nel ticket c'è il link al log |
+| `claude:fatto` | PR aperta (anche in bozza) |
+| `claude:errore` | Qualcosa è andato storto, o la sessione è finita senza PR: nel ticket c'è il link al log |
 | `claude:skip` | Claude non tocca questo ticket. Mettila tu per escludere un ticket. |
 
 ### Comandi nei commenti
