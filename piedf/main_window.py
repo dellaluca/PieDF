@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
     QFileDialog,
     QInputDialog,
     QLabel,
@@ -18,6 +19,9 @@ from PySide6.QtWidgets import (
 from piedf import paths
 from piedf.document import OpenError, PasswordRequired, open_document
 from piedf.renderer import Renderer
+from piedf.signature_dialog import SignatureDialog
+from piedf.signature_manager import SignatureManager
+from piedf.signatures import Kind, SignatureStore
 from piedf.viewer import FitMode, PdfView
 
 MAX_RECENT = 10
@@ -32,6 +36,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self._settings = paths.settings()
+        self.signatures = SignatureStore()
         self._path: str | None = None
         self._gen = 0
 
@@ -104,6 +109,12 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         for action in (self.act_prev, self.act_next, self.act_goto):
             view_menu.addAction(action)
+
+        sign_menu = self.menuBar().addMenu("F&irma")
+        sign_menu.addAction("Crea &firma…", lambda: self.create_signature(Kind.SIGNATURE))
+        sign_menu.addAction("Crea &iniziali…", lambda: self.create_signature(Kind.INITIALS))
+        sign_menu.addSeparator()
+        sign_menu.addAction("&Gestisci firme…", self.manage_signatures)
 
     def _build_toolbar(self) -> None:
         bar = QToolBar("Strumenti")
@@ -272,6 +283,17 @@ class MainWindow(QMainWindow):
             return
         self.view.set_zoom(percent / 100)
         self.view.setFocus()
+
+    # --- Firme ------------------------------------------------------------------------
+
+    def create_signature(self, kind: Kind) -> None:
+        dialog = SignatureDialog(self.signatures, kind, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            saved = "Firma salvata." if dialog.saved.kind is Kind.SIGNATURE else "Iniziali salvate."
+            self.statusBar().showMessage(saved, 5000)
+
+    def manage_signatures(self) -> None:
+        SignatureManager(self.signatures, self).exec()
 
     # --- File recenti -----------------------------------------------------------------
 
