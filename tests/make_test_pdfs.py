@@ -1,4 +1,4 @@
-"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotato."""
+"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotati, firmato digitalmente."""
 import random, re, sys
 from pathlib import Path
 import pymupdf
@@ -55,6 +55,24 @@ p = d.new_page(width=595, height=842)
 p.insert_text((72, 72), "Ruotata 90", fontsize=30)
 p.set_rotation(90)
 d.save(out / "orientamenti.pdf")
+
+# Quattro pagine A4 con /Rotate 0, 90, 180, 270 (salvataggio delle firme, #5)
+d = pymupdf.open()
+for rot in (0, 90, 180, 270):
+    p = d.new_page(width=595, height=842)
+    p.insert_text((72, 72), f"Rotate {rot}", fontsize=30)
+    p.set_rotation(rot)
+d.save(out / "ruotate.pdf")
+
+# "Firmato digitalmente": PyMuPDF non crea firme con certificato, ma un campo firma
+# basta perché get_sigflags() risponda 3 come in un PDF firmato davvero.
+d = pymupdf.open(out / "semplice.pdf")
+wdg = pymupdf.Widget()
+wdg.field_type = pymupdf.PDF_WIDGET_TYPE_SIGNATURE
+wdg.field_name = "FirmaDigitale"
+wdg.rect = pymupdf.Rect(300, 700, 500, 760)
+d[0].add_widget(wdg)
+d.save(out / "firmato_digitale.pdf")
 
 data = (out / "lungo_350.pdf").read_bytes()
 (out / "danneggiato.pdf").write_bytes(data[: len(data) // 2])  # troncato a metà: irrecuperabile

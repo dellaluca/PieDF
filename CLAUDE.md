@@ -15,6 +15,7 @@ Lettore PDF desktop leggero e portatile con firma visiva stile Acrobat "Firma".
 - **Elaborazione immagini senza numpy**: solo Qt + `bytes.translate` (velocità C). Non aggiungere numpy per questo.
 - **Documento nella GUI**: la GUI apre il PDF solo per leggere dimensioni pagine e password, poi lo chiude (niente file bloccati su Windows).
 - **Coordinate delle firme piazzate**: `Placement.rect` è in punti PDF, nello spazio della pagina come si vede (dopo /Rotate), origine in alto a sinistra: lo stesso di `page.rect` in PyMuPDF e di `PdfDocument.page_sizes`. Le conversioni verso lo schermo sono in `PdfView` (`page_at`, `to_page_point`, `page_rect_to_viewport`). I posizionamenti stanno in `Placements` (modello senza widget, con `QUndoStack`: "modificato" = stack non pulito); si svuotano aprendo o chiudendo un documento.
+- **Salvataggio** (`writer.py`): ogni firma è un `page.insert_image(rect * page.derotation_matrix, rotate=page.rotation, overlay=True)` (formula provata su 0/90/180/270°); lo stesso PNG si scrive una volta sola (riuso dell'xref). Su un file nuovo: salvataggio completo su `<dest>.piedf-tmp` e poi `os.replace`, mai un file a metà. Sovrascrivendo lo stesso file, se si può, salvataggio incrementale (con `deflate=True`, altrimenti il PNG finisce non compresso). Sempre `encryption=PDF_ENCRYPT_KEEP`: un PDF cifrato resta cifrato con le stesse password (anche l'owner). Prima di sovrascrivere il file aperto, `Renderer.close(gen, wait=True)` aspetta che il processo di render lo rilasci (su Windows altrimenti è bloccato). Dopo il salvataggio la GUI riapre il file salvato alla stessa pagina e zoom e svuota i posizionamenti: le firme non sono più modificabili. Il primo "Salva" di un documento propone `<nome>_firmato.pdf`.
 
 ## Struttura
 
@@ -30,6 +31,7 @@ Lettore PDF desktop leggero e portatile con firma visiva stile Acrobat "Firma".
 - `piedf/signature_dialog.py` – dialog "Crea firma": Disegna / Scrivi / Immagine
 - `piedf/signature_manager.py` – dialog "Le mie firme": elenco, nuova, elimina
 - `piedf/placements.py` – firme piazzate sul documento (`Placement`, `Placements`), comandi annulla/ripeti, dimensione predefinita
+- `piedf/writer.py` – scrittura delle firme nel PDF (`save_with_signatures`, `SaveError`), controllo firme digitali esistenti
 - `piedf/assets/` – icona e risorse incluse nell'exe
 - `tests/` – `make_test_pdfs.py` genera PDF di prova in `tests/out/` (ignorata da git); `check_<area>.py` sono i controlli end-to-end offscreen (`check_viewer.py`, `check_signatures.py`, …): uscita 1 se qualcosa fallisce, i controlli solo-Windows si saltano altrove
 - `.github/claude/` – istruzioni di orchestratore ed esecutore; `.github/workflows/` – worker e build (li modifica solo la sessione locale)

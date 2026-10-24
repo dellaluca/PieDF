@@ -258,7 +258,7 @@ def main():
     ok = w.open_file(str(PDFS / "lungo_350.pdf"))
     check("10. conferma con Annulla: resta aperto", ok is False and w._path.endswith("semplice.pdf") and len(model.items) == 3
           and texts and texts[0][0] == "Le firme aggiunte a «semplice.pdf» non sono state salvate."
-          and sorted(texts[0][1]) == ["Annulla", "Scarta"], str(texts[:1]))
+          and sorted(texts[0][1]) == ["Annulla", "Salva", "Scarta"], str(texts[:1]))
     answers.append(QMessageBox.StandardButton.Cancel)
     w.act_close.trigger()
     check("Ctrl+W con Annulla: resta aperto", w._path is not None and len(texts) == 2)

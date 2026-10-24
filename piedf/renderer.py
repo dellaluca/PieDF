@@ -1,4 +1,5 @@
 import multiprocessing
+import threading
 
 from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtGui import QImage
@@ -8,6 +9,7 @@ from piedf import render_worker
 # Se il processo di render muore (es. un PDF che manda in crash MuPDF) si riavvia,
 # ma non all'infinito sullo stesso documento.
 MAX_RESTARTS = 3
+CLOSE_TIMEOUT = 5.0  # secondi di attesa perché il processo rilasci il file
 
 
 class Renderer(QObject):
@@ -24,9 +26,11 @@ class Renderer(QObject):
         self._process = None
         self._open_msg = None
         self._restarts = 0
+        self._closed = threading.Condition()
+        self._closed_gen: int | None = None
         self._start_process()
 
-        self._reader = _ResultReader(self._results)
+        self._reader = _ResultReader(self._results, self._on_closed)
         self._reader.page_ready.connect(self.page_ready)
         self._reader.failed.connect(self.failed)
         self._reader.start()
@@ -54,10 +58,29 @@ class Renderer(QObject):
         if self._ensure_alive():
             self._requests.put(self._open_msg)
 
-    def close(self, gen: int) -> None:
+    def close(self, gen: int, wait: bool = False) -> bool:
+        """Chiude il documento; con `wait` aspetta che il file sia davvero rilasciato.
+
+        Serve prima di sovrascrivere il file aperto: su Windows è bloccato finché è aperto.
+        Restituisce False se il processo non ha risposto in tempo.
+        """
         self._open_msg = None
-        if self._process.is_alive():
-            self._requests.put(("open", gen, None, None))
+        if not self._process.is_alive():
+            return True
+        with self._closed:
+            self._closed_gen = None
+        self._requests.put(("open", gen, None, None))
+        if not wait:
+            return True
+        with self._closed:
+            return self._closed.wait_for(
+                lambda: self._closed_gen == gen or not self._process.is_alive(), CLOSE_TIMEOUT
+            )
+
+    def _on_closed(self, gen: int) -> None:
+        with self._closed:
+            self._closed_gen = gen
+            self._closed.notify_all()
 
     def request(self, gen: int, items: list[tuple[int, float]]) -> None:
         if self._ensure_alive():
@@ -80,9 +103,10 @@ class _ResultReader(QThread):
     page_ready = Signal(int, int, float, QImage)
     failed = Signal(int, str)
 
-    def __init__(self, results) -> None:
+    def __init__(self, results, on_closed) -> None:
         super().__init__()
         self._results = results
+        self._on_closed = on_closed  # chiamata da questo thread, non dalla GUI
 
     def run(self) -> None:
         while True:
@@ -95,3 +119,5 @@ class _ResultReader(QThread):
                 self.page_ready.emit(gen, page, scale, image)
             elif msg[0] == "error":
                 self.failed.emit(msg[1], msg[2])
+            elif msg[0] == "closed":
+                self._on_closed(msg[1])

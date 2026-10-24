@@ -1,4 +1,4 @@
-"""Firme piazzate sul documento aperto, ancora in memoria (il salvataggio è #5).
+"""Firme piazzate sul documento aperto, ancora in memoria (le scrive nel PDF `writer.py`).
 
 I rettangoli sono in punti PDF, nelle coordinate della pagina come si vede (dopo /Rotate),
 origine in alto a sinistra: lo stesso spazio di `page.rect` in PyMuPDF e di
@@ -8,7 +8,7 @@ origine in alto a sinistra: lo stesso spazio di `page.rect` in PyMuPDF e di
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPointF, QRectF, Signal
+from PySide6.QtCore import QBuffer, QObject, QPointF, QRectF, Signal
 from PySide6.QtGui import QImage, QUndoCommand, QUndoStack
 
 from piedf.signatures import Kind
@@ -73,6 +73,16 @@ class Placements(QObject):
             self._images[path] = image
         return image
 
+    def missing_pngs(self) -> dict[Path, bytes]:
+        """PNG (dalla memoria) delle firme piazzate il cui file è stato eliminato."""
+        streams = {}
+        for path in {p.image_path for p in self.items if not p.image_path.exists()}:
+            buffer = QBuffer()
+            buffer.open(QBuffer.OpenModeFlag.WriteOnly)
+            self.image(path).save(buffer, "PNG")
+            streams[path] = bytes(buffer.data())
+        return streams
+
     def on_page(self, page: int) -> list[Placement]:
         return [p for p in self.items if p.page == page]
 
@@ -88,7 +98,7 @@ class Placements(QObject):
         self.changed.emit()
 
     def mark_saved(self) -> None:
-        """Da chiamare dopo il salvataggio (#5): toglie l'asterisco dal titolo."""
+        """Toglie l'asterisco dal titolo senza svuotare la storia."""
         self.undo_stack.setClean()
 
     # --- Modifiche (ognuna è un passo di annulla) --------------------------------------
