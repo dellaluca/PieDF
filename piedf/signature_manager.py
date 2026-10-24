@@ -18,17 +18,22 @@ from piedf.signatures import Kind, Signature, SignatureStore
 THUMB = QSize(220, 80)
 
 
-def thumbnail(image: QImage) -> QIcon:
+def thumbnail_pixmap(image: QImage, size: QSize = THUMB) -> QPixmap:
     """Miniatura su fondo bianco con proporzioni fisse, così l'elenco resta allineato."""
-    pixmap = QPixmap(THUMB)
+    pixmap = QPixmap(size)
     pixmap.fill(QColor("#ffffff"))
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-    scaled = image.scaled(THUMB - QSize(16, 16), Qt.AspectRatioMode.KeepAspectRatio,
+    margin = size.height() // 10
+    scaled = image.scaled(size - QSize(2 * margin, 2 * margin), Qt.AspectRatioMode.KeepAspectRatio,
                           Qt.TransformationMode.SmoothTransformation)
-    painter.drawImage((THUMB.width() - scaled.width()) // 2, (THUMB.height() - scaled.height()) // 2, scaled)
+    painter.drawImage((size.width() - scaled.width()) // 2, (size.height() - scaled.height()) // 2, scaled)
     painter.end()
-    return QIcon(pixmap)
+    return pixmap
+
+
+def thumbnail(image: QImage) -> QIcon:
+    return QIcon(thumbnail_pixmap(image))
 
 
 class SignatureManager(QDialog):

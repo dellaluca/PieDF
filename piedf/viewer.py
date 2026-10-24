@@ -3,11 +3,13 @@ import math
 from collections import OrderedDict
 from enum import Enum
 
-from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QWheelEvent
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import QAbstractScrollArea
 
+from piedf.placements import MIN_HEIGHT, Placement, Placements, clamp_rect, default_rect
 from piedf.renderer import Renderer
+from piedf.signatures import Signature
 
 MARGIN = 12  # px logici intorno e tra le pagine
 POINTS_TO_PX = 96 / 72  # al 100% una pagina ha le sue dimensioni reali sullo schermo
@@ -20,6 +22,14 @@ CACHE_BYTES = 300 * 1024 * 1024
 
 BACKGROUND = QColor("#525659")
 PAGE_BORDER = QColor("#3c3f41")
+SELECTION = QColor("#1a73e8")
+HANDLE = 8  # lato delle maniglie, px logici
+PREVIEW_OPACITY = 0.6
+# Angoli in senso orario da in alto a sinistra: maniglie e cursori corrispondenti.
+CORNER_CURSORS = [
+    Qt.CursorShape.SizeFDiagCursor, Qt.CursorShape.SizeBDiagCursor,
+    Qt.CursorShape.SizeFDiagCursor, Qt.CursorShape.SizeBDiagCursor,
+]
 
 
 class FitMode(Enum):
@@ -33,6 +43,7 @@ class PdfView(QAbstractScrollArea):
 
     page_changed = Signal(int)  # indice da 0
     zoom_changed = Signal(float, FitMode)
+    placing_changed = Signal(bool)  # entrata/uscita dalla modalità posizionamento
 
     def __init__(self, renderer: Renderer, parent=None) -> None:
         super().__init__(parent)
@@ -56,6 +67,14 @@ class PdfView(QAbstractScrollArea):
         self._cache_bytes = 0
         self._last_request: list[tuple[int, float]] | None = None
 
+        self._placements = Placements(self)
+        self._placements.changed.connect(self.viewport().update)
+        self._placing: Signature | None = None
+        self._cursor_pos: QPointF | None = None  # ultima posizione del mouse nella vista
+        # Trascinamento in corso: (firma, rettangolo iniziale, punto iniziale in punti, angolo o None).
+        self._drag: tuple[Placement, QRectF, QPointF, int | None] | None = None
+        self.viewport().setMouseTracking(True)
+
     # --- API pubblica -----------------------------------------------------------------
 
     @property
@@ -74,7 +93,67 @@ class PdfView(QAbstractScrollArea):
     def fit_mode(self) -> FitMode:
         return self._fit
 
+    @property
+    def placing(self) -> bool:
+        return self._placing is not None
+
+    def set_placements(self, placements: Placements) -> None:
+        self._placements.changed.disconnect(self.viewport().update)
+        self._placements = placements
+        placements.changed.connect(self.viewport().update)
+
+    def start_placing(self, signature: Signature) -> None:
+        """Modalità posizionamento: l'anteprima segue il cursore, un clic la piazza."""
+        if not self._sizes:
+            return
+        self._drag = None
+        self._placing = signature
+        self._placements.image(signature.path)  # in cache subito, anche se il PNG sparisce
+        self._placements.select(None)
+        self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+        self.setFocus()
+        self.viewport().update()
+        self.placing_changed.emit(True)
+
+    def cancel_placing(self) -> None:
+        if self._placing is None:
+            return
+        self._placing = None
+        self._update_cursor()
+        self.viewport().update()
+        self.placing_changed.emit(False)
+
+    def page_at(self, pos: QPointF | QPoint) -> int | None:
+        """Pagina sotto il punto della vista (px logici), o None sullo sfondo."""
+        pos = QPointF(pos)
+        for page in self._visible_range():
+            if self.page_rect_to_viewport(page, QRectF(QPointF(0, 0), QPointF(*self._sizes[page]))).contains(pos):
+                return page
+        return None
+
+    def to_page_point(self, index: int, pos: QPointF | QPoint) -> QPointF:
+        """Punto della vista (px logici) → punti PDF della pagina `index`."""
+        pos = QPointF(pos)
+        rect = self._page_rect(index)
+        s = self._scale()
+        return QPointF(
+            (pos.x() + self.horizontalScrollBar().value() - rect.x()) / s,
+            (pos.y() + self.verticalScrollBar().value() - rect.y()) / s,
+        )
+
+    def page_rect_to_viewport(self, index: int, rect_pt: QRectF) -> QRectF:
+        """Rettangolo in punti PDF della pagina `index` → coordinate della vista (px logici)."""
+        page = self._page_rect(index)
+        s = self._scale()
+        return QRectF(
+            page.x() - self.horizontalScrollBar().value() + rect_pt.x() * s,
+            page.y() - self.verticalScrollBar().value() + rect_pt.y() * s,
+            rect_pt.width() * s,
+            rect_pt.height() * s,
+        )
+
     def set_document(self, gen: int, page_sizes: list[tuple[float, float]]) -> None:
+        self._reset_interaction()
         self._gen = gen
         self._sizes = page_sizes
         self._clear_cache()
@@ -89,6 +168,7 @@ class PdfView(QAbstractScrollArea):
         self.viewport().update()
 
     def clear(self) -> None:
+        self._reset_interaction()
         self._gen += 1
         self._sizes = []
         self._clear_cache()
@@ -290,6 +370,7 @@ class PdfView(QAbstractScrollArea):
             else:
                 # Render vecchio (zoom appena cambiato) o ridotto: si stira finché arriva quello giusto.
                 painter.drawImage(QRectF(rect), image)
+        self._paint_placements(painter)
         painter.end()
 
         self._request_visible()
@@ -317,7 +398,15 @@ class PdfView(QAbstractScrollArea):
 
     def keyPressEvent(self, event) -> None:
         vbar = self.verticalScrollBar()
-        if event.key() == Qt.Key.Key_Home:
+        selected = self._placements.selected
+        if event.key() == Qt.Key.Key_Escape and self._placing is not None:
+            self.cancel_placing()
+        elif event.key() == Qt.Key.Key_Escape and selected is not None and self._drag is None:
+            self._placements.select(None)
+        elif event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and selected is not None and self._drag is None:
+            self._placements.remove(selected)
+            self._update_cursor()
+        elif event.key() == Qt.Key.Key_Home:
             vbar.setValue(0)
         elif event.key() == Qt.Key.Key_End:
             vbar.setValue(vbar.maximum())
@@ -338,3 +427,168 @@ class PdfView(QAbstractScrollArea):
         if page != self._current:
             self._current = page
             self.page_changed.emit(page)
+
+    # --- Firme piazzate ---------------------------------------------------------------
+
+    def _reset_interaction(self) -> None:
+        self._drag = None
+        self.cancel_placing()
+
+    def _placing_rect(self) -> tuple[int, QRectF] | None:
+        """Pagina e rettangolo (punti) dove finirebbe la firma in posizionamento."""
+        if self._placing is None or self._cursor_pos is None:
+            return None
+        page = self.page_at(self._cursor_pos)
+        if page is None:
+            return None
+        image = self._placements.image(self._placing.path)
+        center = self.to_page_point(page, self._cursor_pos)
+        return page, default_rect(self._placing.kind, image, self._sizes[page], center)
+
+    def _handle_rects(self, rect: QRectF) -> list[QRectF]:
+        corners = [rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft()]
+        # Su pixel interi: maniglie nitide.
+        return [QRectF(round(c.x() - HANDLE / 2), round(c.y() - HANDLE / 2), HANDLE, HANDLE) for c in corners]
+
+    def _paint_placements(self, painter: QPainter) -> None:
+        visible = self._visible_range()
+        for placement in self._placements.items:
+            if placement.page in visible:
+                target = self.page_rect_to_viewport(placement.page, placement.rect)
+                painter.drawImage(target, self._placements.image(placement.image_path))
+
+        selected = self._placements.selected
+        if selected is not None and selected.page in visible:
+            rect = self.page_rect_to_viewport(selected.page, selected.rect)
+            pen = QPen(SELECTION, 1, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect)
+            painter.setPen(QPen(SELECTION, 1))
+            painter.setBrush(Qt.GlobalColor.white)
+            for handle in self._handle_rects(rect):
+                painter.drawRect(handle)
+
+        preview = self._placing_rect()
+        if preview is not None:
+            page, rect = preview
+            painter.setOpacity(PREVIEW_OPACITY)
+            painter.drawImage(self.page_rect_to_viewport(page, rect), self._placements.image(self._placing.path))
+            painter.setOpacity(1.0)
+
+    def _hit(self, pos: QPointF) -> tuple[Placement | None, int | None]:
+        """Firma sotto il punto e, se è la selezionata, l'angolo della maniglia (0-3)."""
+        selected = self._placements.selected
+        if selected is not None and selected.page in self._visible_range():
+            rect = self.page_rect_to_viewport(selected.page, selected.rect)
+            for corner, handle in enumerate(self._handle_rects(rect)):
+                if handle.adjusted(-2, -2, 2, 2).contains(pos):
+                    return selected, corner
+        visible = self._visible_range()
+        # Dall'ultima disegnata: quella sopra vince.
+        for placement in reversed(self._placements.items):
+            if placement.page in visible and self.page_rect_to_viewport(placement.page, placement.rect).contains(pos):
+                return placement, None
+        return None, None
+
+    def _update_cursor(self) -> None:
+        viewport = self.viewport()
+        if self._placing is not None:
+            viewport.setCursor(Qt.CursorShape.CrossCursor)
+        elif self._drag is not None:
+            corner = self._drag[3]
+            viewport.setCursor(Qt.CursorShape.ClosedHandCursor if corner is None else CORNER_CURSORS[corner])
+        else:
+            placement, corner = self._hit(self._cursor_pos) if self._cursor_pos is not None else (None, None)
+            if corner is not None:
+                viewport.setCursor(CORNER_CURSORS[corner])
+            elif placement is not None:
+                viewport.setCursor(Qt.CursorShape.OpenHandCursor)
+            else:
+                viewport.unsetCursor()
+
+    def _resized_rect(self, start: QRectF, corner: int, pt: QPointF, page_size: tuple[float, float]) -> QRectF:
+        """Ridimensiona da un angolo tenendo fermo quello opposto e le proporzioni."""
+        page_w, page_h = page_size
+        ratio = start.width() / start.height()
+        right, bottom = corner in (1, 2), corner in (2, 3)
+        anchor_x = start.left() if right else start.right()
+        anchor_y = start.top() if bottom else start.bottom()
+        # Estensione verso il cursore, nella direzione dell'angolo trascinato.
+        dx = (pt.x() - anchor_x) if right else (anchor_x - pt.x())
+        dy = (pt.y() - anchor_y) if bottom else (anchor_y - pt.y())
+        width = max(dx, dy * ratio)
+        # Dentro la pagina, ma mai sotto l'altezza minima.
+        avail_w = (page_w - anchor_x) if right else anchor_x
+        avail_h = (page_h - anchor_y) if bottom else anchor_y
+        width = min(width, avail_w, avail_h * ratio)
+        width = max(width, MIN_HEIGHT * ratio)
+        height = width / ratio
+        x = anchor_x if right else anchor_x - width
+        y = anchor_y if bottom else anchor_y - height
+        return QRectF(x, y, width, height)
+
+    def mousePressEvent(self, event) -> None:
+        pos = event.position()
+        self._cursor_pos = pos
+        if self._placing is not None:
+            if event.button() == Qt.MouseButton.RightButton:
+                self.cancel_placing()
+            elif event.button() == Qt.MouseButton.LeftButton:
+                target = self._placing_rect()
+                if target is not None:
+                    page, rect = target
+                    signature = self._placing
+                    self.cancel_placing()
+                    self._placements.add(Placement(page, rect, signature.path, signature.kind))
+                    self._update_cursor()
+            event.accept()
+            return
+        if event.button() != Qt.MouseButton.LeftButton or not self._sizes:
+            super().mousePressEvent(event)
+            return
+        placement, corner = self._hit(pos)
+        self._placements.select(placement)
+        if placement is not None:
+            start = self.to_page_point(placement.page, pos)
+            self._drag = (placement, QRectF(placement.rect), start, corner)
+        self._update_cursor()
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        pos = event.position()
+        self._cursor_pos = pos
+        if self._drag is not None:
+            placement, start_rect, start, corner = self._drag
+            pt = self.to_page_point(placement.page, pos)
+            size = self._sizes[placement.page]
+            if corner is None:
+                rect = clamp_rect(start_rect.translated(pt - start), size)
+            else:
+                rect = self._resized_rect(start_rect, corner, pt, size)
+            self._placements.preview_rect(placement, rect)
+        elif self._placing is not None:
+            self.viewport().update()
+        else:
+            self._update_cursor()
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._cursor_pos = event.position()
+        if self._drag is not None and event.button() == Qt.MouseButton.LeftButton:
+            placement, start_rect, _, corner = self._drag
+            self._drag = None
+            text = "spostamento firma" if corner is None else "ridimensionamento firma"
+            # Tutto il trascinamento diventa un solo passo di annulla.
+            self._placements.set_rect(placement, start_rect, QRectF(placement.rect), text)
+            self._update_cursor()
+        event.accept()
+
+    def viewportEvent(self, event) -> bool:
+        # Il mouse esce dalla vista: l'anteprima del posizionamento sparisce.
+        if event.type() == QEvent.Type.Leave and self._drag is None:
+            self._cursor_pos = None
+            if self._placing is not None:
+                self.viewport().update()
+        return super().viewportEvent(event)

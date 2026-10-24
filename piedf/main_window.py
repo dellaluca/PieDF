@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
@@ -11,22 +11,45 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QSpinBox,
     QToolBar,
+    QToolButton,
+    QWidgetAction,
 )
 
 from piedf import paths
 from piedf.document import OpenError, PasswordRequired, open_document
+from piedf.placements import Placements
 from piedf.renderer import Renderer
 from piedf.signature_dialog import SignatureDialog
-from piedf.signature_manager import SignatureManager
-from piedf.signatures import Kind, SignatureStore
+from piedf.signature_manager import SignatureManager, thumbnail_pixmap
+from piedf.signatures import Kind, Signature, SignatureStore
 from piedf.viewer import FitMode, PdfView
 
 MAX_RECENT = 10
 FIT_LABELS = {FitMode.WIDTH: "Adatta larghezza", FitMode.PAGE: "Adatta pagina"}
 ZOOM_PRESETS = [50, 75, 100, 125, 150, 200, 300, 400]
+MENU_THUMB = QSize(160, 52)
+PLACING_HINT = "Clic per posizionare la firma · Esc per annullare"
+
+
+class ThumbnailItem(QLabel):
+    """Voce del menu Firma: solo la miniatura (un'icona di QMenu sarebbe troppo piccola)."""
+
+    clicked = Signal()
+
+    def __init__(self, signature: Signature) -> None:
+        super().__init__()
+        self.setPixmap(thumbnail_pixmap(signature.image(), MENU_THUMB))
+        self.setToolTip(signature.kind.label)
+        self.setMargin(3)
+        self.setStyleSheet("QLabel:hover { background: palette(highlight); }")
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
 
 
 class MainWindow(QMainWindow):
@@ -37,6 +60,8 @@ class MainWindow(QMainWindow):
 
         self._settings = paths.settings()
         self.signatures = SignatureStore()
+        self.placements = Placements(self)
+        self.placements.changed.connect(self._update_title)
         self._path: str | None = None
         self._gen = 0
 
@@ -45,6 +70,8 @@ class MainWindow(QMainWindow):
         self.view = PdfView(self._renderer)
         self.view.page_changed.connect(self._on_page_changed)
         self.view.zoom_changed.connect(self._on_zoom_changed)
+        self.view.placing_changed.connect(self._on_placing_changed)
+        self.view.set_placements(self.placements)
         self.setCentralWidget(self.view)
 
         self._build_actions()
@@ -85,6 +112,15 @@ class MainWindow(QMainWindow):
         )
         self.act_goto = self._action("&Vai a pagina…", self._focus_page_box, ["Ctrl+G"])
 
+        # Il testo segue l'ultimo comando: "Annulla spostamento firma".
+        stack = self.placements.undo_stack
+        self.act_undo = stack.createUndoAction(self, "Annulla")
+        self.act_undo.setShortcuts([QKeySequence("Ctrl+Z")])
+        self.act_redo = stack.createRedoAction(self, "Ripeti")
+        self.act_redo.setShortcuts([QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
+        self.addAction(self.act_undo)
+        self.addAction(self.act_redo)
+
         self._doc_actions = [
             self.act_close, self.act_zoom_in, self.act_zoom_out, self.act_actual,
             self.act_fit_page, self.act_fit_width, self.act_prev, self.act_next, self.act_goto,
@@ -99,6 +135,10 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_close)
         file_menu.addSeparator()
         file_menu.addAction(self.act_quit)
+
+        edit_menu = self.menuBar().addMenu("&Modifica")
+        edit_menu.addAction(self.act_undo)
+        edit_menu.addAction(self.act_redo)
 
         view_menu = self.menuBar().addMenu("&Visualizza")
         for action in (self.act_zoom_in, self.act_zoom_out, self.act_actual):
@@ -156,8 +196,20 @@ class MainWindow(QMainWindow):
         )
         bar.addWidget(self._zoom_box)
         bar.addAction(self.act_zoom_in)
+        bar.addSeparator()
 
-        self._doc_widgets = [self._page_box, self._zoom_box]
+        self._sign_menu = QMenu(self)
+        self._sign_menu.aboutToShow.connect(self._fill_sign_menu)
+        self.sign_button = QToolButton()
+        self.sign_button.setText("Firma ▾")
+        self.sign_button.setToolTip("Metti una firma sul documento")
+        self.sign_button.setMenu(self._sign_menu)
+        self.sign_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        # La freccia è già nel testo.
+        self.sign_button.setStyleSheet("QToolButton::menu-indicator { image: none; }")
+        bar.addWidget(self.sign_button)
+
+        self._doc_widgets = [self._page_box, self._zoom_box, self.sign_button]
 
     def _update_enabled(self) -> None:
         has_doc = self._path is not None
@@ -166,7 +218,8 @@ class MainWindow(QMainWindow):
 
     def _update_title(self) -> None:
         if self._path:
-            self.setWindowTitle(f"{Path(self._path).name} – PieDF")
+            star = "* " if self.placements.modified else ""
+            self.setWindowTitle(f"{star}{Path(self._path).name} – PieDF")
         else:
             self.setWindowTitle("PieDF")
 
@@ -206,6 +259,9 @@ class MainWindow(QMainWindow):
                 self._remove_recent(path)
                 return False
 
+        if not self._confirm_discard():
+            return False
+        self.placements.clear()
         self._gen += 1
         self._path = path
         self._renderer.open(self._gen, path, doc.password)
@@ -222,7 +278,10 @@ class MainWindow(QMainWindow):
             self.statusBar().clearMessage()
         return True
 
-    def close_document(self) -> None:
+    def close_document(self) -> bool:
+        if not self._confirm_discard():
+            return False
+        self.placements.clear()
         self._path = None
         self._gen += 1
         self._renderer.close(self._gen)
@@ -231,6 +290,21 @@ class MainWindow(QMainWindow):
         self._page_total.setText(" / 0 ")
         self._update_title()
         self._update_enabled()
+        return True
+
+    def _confirm_discard(self) -> bool:
+        """Chiede se scartare le firme non salvate; False se l'utente annulla."""
+        if self._path is None or not self.placements.modified:
+            return True
+        box = QMessageBox(
+            QMessageBox.Icon.Warning, "Firme non salvate",
+            f"Le firme aggiunte a «{Path(self._path).name}» non sono state salvate.",
+            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel, self,
+        )
+        box.button(QMessageBox.StandardButton.Discard).setText("Scarta")
+        box.button(QMessageBox.StandardButton.Cancel).setText("Annulla")
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        return box.exec() == QMessageBox.StandardButton.Discard
 
     def _on_render_failed(self, gen: int, message: str) -> None:
         if gen == self._gen:
@@ -286,14 +360,54 @@ class MainWindow(QMainWindow):
 
     # --- Firme ------------------------------------------------------------------------
 
-    def create_signature(self, kind: Kind) -> None:
+    def create_signature(self, kind: Kind) -> Signature | None:
         dialog = SignatureDialog(self.signatures, kind, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             saved = "Firma salvata." if dialog.saved.kind is Kind.SIGNATURE else "Iniziali salvate."
             self.statusBar().showMessage(saved, 5000)
+            return dialog.saved
+        return None
 
     def manage_signatures(self) -> None:
         SignatureManager(self.signatures, self).exec()
+
+    def place_signature(self, signature: Signature) -> None:
+        self._sign_menu.close()
+        self.view.start_placing(signature)
+
+    def _create_and_place(self, kind: Kind) -> None:
+        signature = self.create_signature(kind)
+        if signature is not None and self._path is not None:
+            self.place_signature(signature)
+
+    def _fill_sign_menu(self) -> None:
+        menu = self._sign_menu
+        menu.clear()
+        signatures = self.signatures.list(Kind.SIGNATURE)
+        initials = self.signatures.list(Kind.INITIALS)
+        for group in (signatures, initials):
+            if group and not menu.isEmpty():
+                menu.addSeparator()
+            for signature in group:
+                action = QWidgetAction(menu)
+                item = ThumbnailItem(signature)
+                item.clicked.connect(action.trigger)
+                action.setDefaultWidget(item)
+                action.setToolTip(signature.kind.label)
+                action.triggered.connect(lambda _=False, s=signature: self.place_signature(s))
+                menu.addAction(action)
+        if not menu.isEmpty():
+            menu.addSeparator()
+        menu.addAction("Nuova firma…", lambda: self._create_and_place(Kind.SIGNATURE))
+        menu.addAction("Nuove iniziali…", lambda: self._create_and_place(Kind.INITIALS))
+        if signatures or initials:
+            menu.addAction("Gestisci firme…", self.manage_signatures)
+
+    def _on_placing_changed(self, placing: bool) -> None:
+        if placing:
+            self.statusBar().showMessage(PLACING_HINT)
+        elif self.statusBar().currentMessage() == PLACING_HINT:
+            self.statusBar().clearMessage()
 
     # --- File recenti -----------------------------------------------------------------
 
@@ -327,5 +441,8 @@ class MainWindow(QMainWindow):
     # --- Chiusura ---------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
+        if not self._confirm_discard():
+            event.ignore()
+            return
         self._renderer.shutdown()
         super().closeEvent(event)
