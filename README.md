@@ -14,6 +14,26 @@ python -m piedf            # finestra vuota
 python -m piedf file.pdf   # apre direttamente un file
 ```
 
+Controllo automatico del viewer su PDF di prova (semplice, 350 pagine, cifrato, scansionato, danneggiati…):
+
+```bash
+python tests/make_test_pdfs.py
+set QT_QPA_PLATFORM=offscreen
+python tests/check_viewer.py
+```
+
+## Scorciatoie
+
+| Tasto | Azione |
+|---|---|
+| Ctrl+O | Apri |
+| Ctrl+W | Chiudi documento |
+| Ctrl+rotella, Ctrl++ / Ctrl+− | Zoom |
+| Ctrl+1 / Ctrl+0 / Ctrl+2 | Dimensione reale / Adatta pagina / Adatta larghezza |
+| Ctrl+PgSu / Ctrl+PgGiù | Pagina precedente / successiva |
+| Ctrl+G | Vai a pagina |
+| Home / Fine | Inizio / fine documento |
+
 Lo sviluppo procede a ticket: vedi le [issue](https://github.com/dellaluca/PieDF/issues).
 
 ## Licenza
