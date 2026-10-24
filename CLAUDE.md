@@ -9,6 +9,7 @@ Lettore PDF desktop leggero e portatile con firma visiva stile Acrobat "Firma".
 - **Firma**: solo visiva (disegnata / scritta in corsivo / immagine), inserita come immagine con `page.insert_image`. Niente firme con certificato.
 - **Mai rasterizzare le pagine** al salvataggio: il resto del PDF deve restare intatto.
 - **Dati utente** (firme, impostazioni): `data/` accanto all'exe se scrivibile, altrimenti `%APPDATA%\PieDF`.
+- **Exe** (`piedf.spec`, `python tools/build_exe.py`): PyInstaller **onedir** distribuito in uno zip (`dist/PieDF-<versione>-win64.zip`), non onefile (si scompatta a ogni avvio e il processo di render rilancia l'exe). Nell'exe il processo di render è l'exe stesso con `--multiprocessing-fork`: `__main__.py` chiama `freeze_support()` prima di importare `piedf.app`, così il figlio non carica Qt. Lo spec esclude i moduli Qt non usati (se ne aggiungi uno a `piedf`, toglilo da `EXCLUDES`), i plugin immagine tranne jpeg/ico, le traduzioni tranne `qtbase_it` e `pymupdf.layout` (onnxruntime, ~30 MB). Le risorse stanno in `_internal/piedf/assets`, dove punta già `Path(__file__).parent`. Versione dell'exe da `piedf.__version__`.
 - **Licenza**: PyMuPDF è AGPL; ok finché uso personale / repo privato.
 - **Render in un processo separato**: PyMuPDF tiene il GIL durante il render (una pagina pesante bloccava la GUI per 2 s anche da un thread), quindi le pagine si disegnano in un processo `multiprocessing` "spawn". Per questo `__main__.py` ha la guardia `if __name__ == "__main__"` e `freeze_support()`: non toglierli (servono anche a PyInstaller). Il processo di render non importa Qt.
 - **Font per "Scrivi"**: si usano i font calligrafici presenti in ogni Windows 10/11 (Segoe Script, Segoe Print, Ink Free, Gabriola), registrati da `%WINDIR%\Fonts` se Qt non li vede. Nessun font incluso nell'exe: la firma diventa comunque un PNG.
@@ -33,7 +34,9 @@ Lettore PDF desktop leggero e portatile con firma visiva stile Acrobat "Firma".
 - `piedf/placements.py` – firme piazzate sul documento (`Placement`, `Placements`), comandi annulla/ripeti, dimensione predefinita
 - `piedf/writer.py` – scrittura delle firme nel PDF (`save_with_signatures`, `SaveError`), controllo firme digitali esistenti
 - `piedf/assets/` – icona e risorse incluse nell'exe
-- `tests/` – `make_test_pdfs.py` genera PDF di prova in `tests/out/` (ignorata da git); `check_<area>.py` sono i controlli end-to-end offscreen (`check_viewer.py`, `check_signatures.py`, …): uscita 1 se qualcosa fallisce, i controlli solo-Windows si saltano altrove
+- `piedf.spec` – spec di PyInstaller (onedir; `-- --onefile` per il confronto), esclusioni, icona, informazioni di versione
+- `tools/build_exe.py` – lancia PyInstaller, crea lo zip e stampa le dimensioni; `requirements-build.txt` – solo per costruire (PyInstaller)
+- `tests/` – `make_test_pdfs.py` genera PDF di prova in `tests/out/` (ignorata da git); `check_<area>.py` sono i controlli end-to-end offscreen (`check_viewer.py`, `check_signatures.py`, …): uscita 1 se qualcosa fallisce, i controlli solo-Windows si saltano altrove (`check_exe.py` richiede anche la build in `dist/`)
 - `.github/claude/` – istruzioni di orchestratore ed esecutore; `.github/workflows/` – worker e build (li modifica solo la sessione locale)
 - `docs/automazione.md` – come funzionano e si configurano i worker
 
