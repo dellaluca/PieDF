@@ -1,7 +1,9 @@
-"""Scrittura delle firme piazzate nel PDF (senza Qt nella logica: i rettangoli arrivano da `Placement`).
+"""Scrittura delle firme piazzate e dei campi compilati nel PDF (senza Qt nella logica:
+i rettangoli arrivano da `Placement`).
 
-Ogni firma diventa un'immagine sopra la pagina (`page.insert_image`): il resto del
-documento non viene toccato né rasterizzato.
+Ogni firma diventa un'immagine sopra la pagina (`page.insert_image`); i campi restano
+campi (si scrive solo il valore e il suo aspetto). Il resto del documento non viene
+toccato né rasterizzato.
 """
 
 import os
@@ -9,6 +11,8 @@ from collections.abc import Iterable
 from pathlib import Path
 
 import pymupdf
+
+from piedf.document import set_field_value
 
 TMP_SUFFIX = ".piedf-tmp"
 
@@ -33,11 +37,12 @@ def has_digital_signatures(path: str, password: str | None = None) -> bool:
 
 def save_with_signatures(
     src: str, password: str | None, placements: Iterable, dest: str,
-    streams: dict[Path, bytes] | None = None,
+    streams: dict[Path, bytes] | None = None, fields: Iterable[tuple[int, int, str]] = (),
 ) -> None:
-    """Scrive `src` con le firme in `dest` (anche lo stesso file). Solleva `SaveError`.
+    """Scrive `src` con le firme e i campi in `dest` (anche lo stesso file). Solleva `SaveError`.
 
     `streams` dà il PNG di una firma il cui file non c'è più (eliminata da "Le mie firme").
+    `fields` sono i valori cambiati dei campi modulo: (pagina, xref del widget, valore).
     Il file sorgente non deve essere aperto da altri processi (render) se `dest` è `src`.
     """
     streams = streams or {}
@@ -51,6 +56,9 @@ def save_with_signatures(
             raise SaveError(f"Impossibile rileggere il documento originale.\n\nDettagli: {e}") from e
         if doc.needs_pass and not doc.authenticate(password or ""):
             raise SaveError("Password del documento non valida.")
+
+        for page, xref, value in fields:
+            set_field_value(doc[page], xref, value)
 
         xrefs: dict[Path, int] = {}  # stesso PNG piazzato più volte → una sola copia nel file
         for pl in placements:

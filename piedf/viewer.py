@@ -5,8 +5,10 @@ from enum import Enum
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QWheelEvent
-from PySide6.QtWidgets import QAbstractScrollArea
+from PySide6.QtWidgets import QAbstractScrollArea, QComboBox, QLineEdit, QListWidget, QPlainTextEdit, QWidget
 
+from piedf.document import COMBO, LIST, TEXT, FormField
+from piedf.forms import FormValues
 from piedf.placements import MIN_HEIGHT, Placement, Placements, clamp_rect, default_rect
 from piedf.renderer import Renderer
 from piedf.signatures import Signature
@@ -25,6 +27,9 @@ PAGE_BORDER = QColor("#3c3f41")
 SELECTION = QColor("#1a73e8")
 HANDLE = 8  # lato delle maniglie, px logici
 PREVIEW_OPACITY = 0.6
+FIELD_HIGHLIGHT = QColor(204, 215, 255, 150)  # azzurro semitrasparente, come in Acrobat
+FIELD_FONT_PT = 12.0  # font dell'editor per i campi a dimensione automatica (massimo)
+ALIGNMENTS = [Qt.AlignmentFlag.AlignLeft, Qt.AlignmentFlag.AlignHCenter, Qt.AlignmentFlag.AlignRight]
 # Angoli in senso orario da in alto a sinistra: maniglie e cursori corrispondenti.
 CORNER_CURSORS = [
     Qt.CursorShape.SizeFDiagCursor, Qt.CursorShape.SizeBDiagCursor,
@@ -49,6 +54,7 @@ class PdfView(QAbstractScrollArea):
         super().__init__(parent)
         self._renderer = renderer
         renderer.page_ready.connect(self._on_page_ready)
+        renderer.field_applied.connect(self._on_field_applied)
 
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.verticalScrollBar().setSingleStep(40)
@@ -75,6 +81,14 @@ class PdfView(QAbstractScrollArea):
         self._drag: tuple[Placement, QRectF, QPointF, int | None] | None = None
         self.viewport().setMouseTracking(True)
 
+        self._forms = FormValues(self._placements.undo_stack, self)
+        self._connect_forms()
+        self._highlight = True
+        self._focus_field: FormField | None = None  # campo attivo (Tab, Spazio), con o senza editor
+        self._editing: FormField | None = None
+        self._editor: QWidget | None = None  # editor sul posto, figlio del viewport
+        self._committing = False
+
     # --- API pubblica -----------------------------------------------------------------
 
     @property
@@ -97,15 +111,44 @@ class PdfView(QAbstractScrollArea):
     def placing(self) -> bool:
         return self._placing is not None
 
+    @property
+    def editing_field(self) -> FormField | None:
+        return self._editing
+
+    @property
+    def editor(self) -> QWidget | None:
+        return self._editor
+
+    @property
+    def focus_field(self) -> FormField | None:
+        return self._focus_field
+
     def set_placements(self, placements: Placements) -> None:
         self._placements.changed.disconnect(self.viewport().update)
         self._placements = placements
         placements.changed.connect(self.viewport().update)
 
+    def set_forms(self, forms: FormValues) -> None:
+        self._forms.values_changed.disconnect(self._on_values_changed)
+        self._forms.fields_reset.disconnect(self._on_fields_reset)
+        self._forms = forms
+        self._connect_forms()
+
+    def set_highlight(self, on: bool) -> None:
+        """Sfondo azzurro sui campi compilabili."""
+        self._highlight = on
+        self.viewport().update()
+
+    def commit_editor(self) -> None:
+        """Conferma il testo in corso nell'editor (prima di salvare o chiudere)."""
+        self._close_editor(commit=True)
+
     def start_placing(self, signature: Signature) -> None:
         """Modalità posizionamento: l'anteprima segue il cursore, un clic la piazza."""
         if not self._sizes:
             return
+        self._close_editor(commit=True)
+        self._focus_field = None
         self._drag = None
         self._placing = signature
         self._placements.image(signature.path)  # in cache subito, anche se il PNG sparisce
@@ -242,6 +285,7 @@ class PdfView(QAbstractScrollArea):
         self._content_h = y if self._sizes else 0
         self._content_w = max_w + 2 * MARGIN if self._sizes else 0
         self._update_scrollbars()
+        self._place_editor()
 
     def _update_scrollbars(self) -> None:
         vw, vh = self.viewport().width(), self.viewport().height()
@@ -393,6 +437,7 @@ class PdfView(QAbstractScrollArea):
             else:
                 # Render vecchio (zoom appena cambiato) o ridotto: si stira finché arriva quello giusto.
                 painter.drawImage(QRectF(rect), image)
+        self._paint_fields(painter)
         self._paint_placements(painter)
         painter.end()
 
@@ -401,6 +446,7 @@ class PdfView(QAbstractScrollArea):
     def scrollContentsBy(self, dx: int, dy: int) -> None:
         self.viewport().update()
         self._update_current_page()
+        self._place_editor()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -411,6 +457,7 @@ class PdfView(QAbstractScrollArea):
             self.zoom_changed.emit(self._zoom, self._fit)
         else:
             self._update_scrollbars()
+        self._place_editor()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -424,8 +471,14 @@ class PdfView(QAbstractScrollArea):
     def keyPressEvent(self, event) -> None:
         vbar = self.verticalScrollBar()
         selected = self._placements.selected
+        focus = self._focus_field
         if event.key() == Qt.Key.Key_Escape and self._placing is not None:
             self.cancel_placing()
+        elif event.key() == Qt.Key.Key_Space and focus is not None and focus.on_state is not None:
+            self._forms.toggle(focus)
+        elif event.key() == Qt.Key.Key_Escape and focus is not None:
+            self._focus_field = None
+            self.viewport().update()
         elif event.key() == Qt.Key.Key_Escape and selected is not None and self._drag is None:
             self._placements.select(None)
         elif event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and selected is not None and self._drag is None:
@@ -458,6 +511,8 @@ class PdfView(QAbstractScrollArea):
     def _reset_interaction(self) -> None:
         self._drag = None
         self.cancel_placing()
+        self._close_editor(commit=False)
+        self._focus_field = None
 
     def _placing_rect(self) -> tuple[int, QRectF] | None:
         """Pagina e rettangolo (punti) dove finirebbe la firma in posizionamento."""
@@ -526,8 +581,12 @@ class PdfView(QAbstractScrollArea):
             viewport.setCursor(Qt.CursorShape.ClosedHandCursor if corner is None else CORNER_CURSORS[corner])
         else:
             placement, corner = self._hit(self._cursor_pos) if self._cursor_pos is not None else (None, None)
+            field = self._field_at(self._cursor_pos) if corner is None and self._cursor_pos is not None else None
             if corner is not None:
                 viewport.setCursor(CORNER_CURSORS[corner])
+            elif field is not None:
+                text = field.type == TEXT or (field.type == COMBO and field.editable)
+                viewport.setCursor(Qt.CursorShape.IBeamCursor if text else Qt.CursorShape.PointingHandCursor)
             elif placement is not None:
                 viewport.setCursor(Qt.CursorShape.OpenHandCursor)
             else:
@@ -557,6 +616,8 @@ class PdfView(QAbstractScrollArea):
     def mousePressEvent(self, event) -> None:
         pos = event.position()
         self._cursor_pos = pos
+        # Un clic fuori dall'editor conferma quello che si è scritto (l'editor riceve i suoi clic).
+        self._close_editor(commit=True)
         if self._placing is not None:
             if event.button() == Qt.MouseButton.RightButton:
                 self.cancel_placing()
@@ -574,6 +635,17 @@ class PdfView(QAbstractScrollArea):
             super().mousePressEvent(event)
             return
         placement, corner = self._hit(pos)
+        # Il campo ha la precedenza sulla firma, tranne sulle maniglie della firma selezionata.
+        field = self._field_at(pos) if corner is None else None
+        if field is not None:
+            self._placements.select(None)
+            self._activate_field(field, clicked=True)
+            self._update_cursor()
+            event.accept()
+            return
+        if self._focus_field is not None:
+            self._focus_field = None
+            self.viewport().update()
         self._placements.select(placement)
         if placement is not None:
             start = self.to_page_point(placement.page, pos)
@@ -617,3 +689,236 @@ class PdfView(QAbstractScrollArea):
             if self._placing is not None:
                 self.viewport().update()
         return super().viewportEvent(event)
+
+    # --- Campi modulo -----------------------------------------------------------------
+
+    def _connect_forms(self) -> None:
+        self._forms.values_changed.connect(self._on_values_changed)
+        self._forms.fields_reset.connect(self._on_fields_reset)
+
+    def _on_fields_reset(self) -> None:
+        self._close_editor(commit=False)
+        self._focus_field = None
+        self.viewport().update()
+
+    def _on_values_changed(self, fields: list) -> None:
+        for f in fields:
+            self._renderer.set_field(self._gen, f.page, f.xref, f.value)
+        # Annulla/ripeti su un campo aperto: l'editor mostrerebbe un valore vecchio.
+        if self._editing in fields and not self._committing:
+            self._close_editor(commit=False)
+        self.viewport().update()
+
+    def _on_field_applied(self, gen: int, page: int) -> None:
+        """Il campo è nel documento del processo di render: i render già fatti della pagina sono vecchi."""
+        if gen != self._gen:
+            return
+        cached = self._cache.get(page)
+        if cached is not None:
+            # Si continua a mostrare quello vecchio (niente lampo bianco) finché arriva il nuovo.
+            self._cache[page] = (-1.0, cached[1])
+        self._last_request = None
+        self.viewport().update()
+
+    def _field_rect(self, field: FormField) -> QRectF:
+        x0, y0, x1, y1 = field.rect
+        return QRectF(x0, y0, x1 - x0, y1 - y0)
+
+    def _field_at(self, pos: QPointF) -> FormField | None:
+        """Campo compilabile sotto il punto della vista (i campi firma e i pulsanti non contano)."""
+        for page in self._visible_range():
+            for f in self._forms.on_page(page):
+                if f.fillable and self.page_rect_to_viewport(page, self._field_rect(f)).contains(pos):
+                    return f
+        return None
+
+    def _paint_fields(self, painter: QPainter) -> None:
+        visible = self._visible_range()
+        if self._highlight:
+            for page in visible:
+                for f in self._forms.on_page(page):
+                    if f.fillable:
+                        painter.fillRect(self.page_rect_to_viewport(page, self._field_rect(f)), FIELD_HIGHLIGHT)
+        focus = self._focus_field
+        if focus is not None and self._editor is None and focus.page in visible:
+            pen = QPen(SELECTION, 1, Qt.PenStyle.DotLine)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(self.page_rect_to_viewport(focus.page, self._field_rect(focus)).adjusted(-2, -2, 2, 2))
+
+    def _activate_field(self, field: FormField, clicked: bool) -> None:
+        """Clic o Tab su un campo: caselle e radio si cambiano col clic, gli altri si aprono nell'editor."""
+        self._focus_field = field
+        if not clicked:
+            self._ensure_visible(field)
+        if field.type in (TEXT, COMBO, LIST):
+            self._open_editor(field, select_all=not clicked)
+            if clicked and field.type == COMBO and not field.editable:
+                self._editor.showPopup()
+        else:
+            self.setFocus()
+            if clicked:
+                self._forms.toggle(field)
+        self.viewport().update()
+
+    def _move_focus(self, forward: bool) -> bool:
+        """Tab / Maiusc+Tab: campo successivo o precedente, anche sulle pagine dopo."""
+        order = self._forms.tab_order
+        if not order:
+            return False
+        self._close_editor(commit=True)
+        current = self._focus_field
+        if current in order:
+            index = (order.index(current) + (1 if forward else -1)) % len(order)
+        elif forward:
+            index = next((i for i, f in enumerate(order) if f.page >= self._current), 0)
+        else:
+            index = next((i for i in reversed(range(len(order))) if order[i].page <= self._current), len(order) - 1)
+        self._activate_field(order[index], clicked=False)
+        return True
+
+    def focusNextPrevChild(self, next: bool) -> bool:
+        if self._placing is None and self._sizes and self._move_focus(next):
+            return True
+        return super().focusNextPrevChild(next)
+
+    def _ensure_visible(self, field: FormField) -> None:
+        """Porta il campo in vista (a un terzo dall'alto se era fuori)."""
+        rect = self.page_rect_to_viewport(field.page, self._field_rect(field))
+        view = QRectF(self.viewport().rect())
+        vbar, hbar = self.verticalScrollBar(), self.horizontalScrollBar()
+        if rect.top() < 0 or rect.bottom() > view.bottom():
+            vbar.setValue(round(vbar.value() + rect.top() - view.height() / 3))
+        if rect.left() < 0 or rect.right() > view.right():
+            hbar.setValue(round(hbar.value() + rect.center().x() - view.width() / 2))
+
+    def _open_editor(self, field: FormField, select_all: bool) -> None:
+        self._close_editor(commit=True)
+        parent = self.viewport()
+        if field.type == TEXT and field.multiline:
+            editor = QPlainTextEdit(field.value, parent)
+            if field.max_len:
+                editor.textChanged.connect(lambda: self._limit_text(editor, field.max_len))
+            editor.moveCursor(editor.textCursor().MoveOperation.End)
+            if select_all:
+                editor.selectAll()
+        elif field.type == TEXT:
+            editor = QLineEdit(field.value, parent)
+            if field.max_len:
+                editor.setMaxLength(field.max_len)
+            if field.password:
+                editor.setEchoMode(QLineEdit.EchoMode.Password)
+            editor.setAlignment(ALIGNMENTS[field.align if 0 <= field.align < 3 else 0])
+            if select_all:
+                editor.selectAll()
+        elif field.type == COMBO:
+            editor = QComboBox(parent)
+            editor.setEditable(field.editable)
+            editor.addItems([text for _, text in field.choices])
+            index = next((i for i, (value, _) in enumerate(field.choices) if value == field.value), -1)
+            editor.setCurrentIndex(index)
+            if field.editable:
+                if index < 0:
+                    editor.setEditText(field.value)
+                editor.lineEdit().installEventFilter(self)
+                if select_all:
+                    editor.lineEdit().selectAll()
+            else:
+                # Scegliere una voce la conferma subito; l'editor resta aperto finché si esce dal campo.
+                editor.activated.connect(lambda _: self._commit())
+        else:
+            editor = QListWidget(parent)
+            editor.addItems([text for _, text in field.choices])
+            editor.setCurrentRow(next((i for i, (value, _) in enumerate(field.choices) if value == field.value), -1))
+            editor.itemClicked.connect(lambda _: self._commit())
+        editor.installEventFilter(self)
+        self._editor, self._editing = editor, field
+        self._place_editor()
+        editor.show()
+        editor.setFocus()
+
+    def _limit_text(self, editor: QPlainTextEdit, max_len: int) -> None:
+        text = editor.toPlainText()
+        if len(text) > max_len:
+            cursor = editor.textCursor()
+            position = min(cursor.position(), max_len)
+            editor.setPlainText(text[:max_len])
+            cursor.setPosition(position)
+            editor.setTextCursor(cursor)
+
+    def _place_editor(self) -> None:
+        """Segue il campo con scroll e zoom; il font scala con lo zoom."""
+        editor, field = self._editor, self._editing
+        if editor is None or not self._sizes:
+            return
+        rect = self.page_rect_to_viewport(field.page, self._field_rect(field)).toAlignedRect()
+        size = field.font_size or min(FIELD_FONT_PT, (field.rect[3] - field.rect[1]) * 0.7)
+        if field.type in (COMBO, LIST) and not field.font_size:
+            size = FIELD_FONT_PT
+        font = editor.font()
+        font.setPixelSize(max(1, round(size * self._scale())))
+        editor.setFont(font)
+        editor.setGeometry(rect)
+
+    def _editor_value(self) -> str:
+        editor, field = self._editor, self._editing
+        if isinstance(editor, QLineEdit):
+            return editor.text()
+        if isinstance(editor, QPlainTextEdit):
+            return editor.toPlainText()
+        if isinstance(editor, QComboBox):
+            if field.editable:
+                text = editor.currentText()
+                return next((value for value, shown in field.choices if shown == text), text)
+            index = editor.currentIndex()
+            return field.choices[index][0] if 0 <= index < len(field.choices) else field.value
+        row = editor.currentRow()
+        return field.choices[row][0] if 0 <= row < len(field.choices) else field.value
+
+    def _commit(self) -> None:
+        if self._editor is None:
+            return
+        value = self._editor_value()
+        if value != self._editing.value:
+            self._committing = True
+            try:
+                self._forms.set_value(self._editing, value)
+            finally:
+                self._committing = False
+
+    def _close_editor(self, commit: bool) -> None:
+        editor = self._editor
+        if editor is None:
+            return
+        if commit:
+            self._commit()
+        self._editor = self._editing = None
+        focus = editor.window().focusWidget()
+        if focus is not None and (focus is editor or editor.isAncestorOf(focus)):
+            self.setFocus()
+        editor.hide()
+        editor.deleteLater()
+        self.viewport().update()
+
+    def eventFilter(self, obj, event) -> bool:
+        if self._editor is not None and event.type() == QEvent.Type.KeyPress:
+            key, mods = event.key(), event.modifiers()
+            if key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+                back = key == Qt.Key.Key_Backtab or bool(mods & Qt.KeyboardModifier.ShiftModifier)
+                self._move_focus(not back)
+                return True
+            if key == Qt.Key.Key_Escape:
+                if isinstance(self._editor, QComboBox) and self._editor.view().isVisible():
+                    return False  # chiude solo il menu
+                self._close_editor(commit=False)
+                self.setFocus()
+                return True
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                # Nel multiriga Invio va a capo, Ctrl+Invio conferma.
+                if isinstance(self._editor, QPlainTextEdit) and not mods & Qt.KeyboardModifier.ControlModifier:
+                    return False
+                self._close_editor(commit=True)
+                self.setFocus()
+                return True
+        return super().eventFilter(obj, event)

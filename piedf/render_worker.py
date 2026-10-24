@@ -7,11 +7,13 @@ non importa Qt, così il processo figlio parte in fretta.
 Messaggi in ingresso:
     ("open", gen, path, password)        path None chiude il documento
     ("want", gen, [(page, scale), ...])   sostituisce la lista precedente
+    ("field", gen, page, xref, value)     valore di un campo modulo, solo nel documento in memoria
     ("quit",)
 Messaggi in uscita:
     ("page", gen, page, scale, width, height, stride, samples_rgb)
     ("error", gen, message)
     ("closed", gen)                       documento chiuso: il file non è più aperto qui
+    ("field", gen, page)                  campo applicato: i render precedenti della pagina sono vecchi
 """
 
 import queue
@@ -19,6 +21,8 @@ import queue
 
 def run(requests, results) -> None:
     import pymupdf
+
+    from piedf.document import set_field_value
 
     doc = None
     gen = 0
@@ -51,6 +55,13 @@ def run(requests, results) -> None:
                     results.put(("error", gen, str(e)))
             elif kind == "want" and msg[1] == gen:
                 wanted = list(msg[2])
+            elif kind == "field" and msg[1] == gen and doc is not None:
+                _, _, page, xref, value = msg
+                try:
+                    set_field_value(doc[page], xref, value)
+                except Exception as e:
+                    results.put(("error", gen, f"Campo {xref}: {e}"))
+                results.put(("field", gen, page))
             msg = _get_nowait(requests)
 
         if doc is None or not wanted:

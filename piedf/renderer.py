@@ -17,6 +17,7 @@ class Renderer(QObject):
 
     page_ready = Signal(int, int, float, QImage)  # gen, pagina, scala, immagine
     failed = Signal(int, str)  # gen, messaggio
+    field_applied = Signal(int, int)  # gen, pagina: il campo è nel documento, la pagina va ridisegnata
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -25,6 +26,10 @@ class Renderer(QObject):
         self._results = self._ctx.Queue()
         self._process = None
         self._open_msg = None
+        # Valori dei campi già mandati per il documento aperto (xref → messaggio):
+        # si rimandano se il processo riparte o riapre il file.
+        self._fields: dict[int, tuple] = {}
+        self._fields_gen: int | None = None
         self._restarts = 0
         self._closed = threading.Condition()
         self._closed_gen: int | None = None
@@ -33,6 +38,7 @@ class Renderer(QObject):
         self._reader = _ResultReader(self._results, self._on_closed)
         self._reader.page_ready.connect(self.page_ready)
         self._reader.failed.connect(self.failed)
+        self._reader.field_applied.connect(self.field_applied)
         self._reader.start()
 
     def _start_process(self) -> None:
@@ -50,13 +56,32 @@ class Renderer(QObject):
         self._start_process()
         if self._open_msg is not None:
             self._requests.put(self._open_msg)
+            self._send_fields()
         return True
 
     def open(self, gen: int, path: str, password: str | None) -> None:
+        """Apre il documento. Riaprendo lo stesso `gen` (salvataggio fallito) i campi cambiati restano."""
         self._open_msg = ("open", gen, path, password)
+        if gen != self._fields_gen:
+            self._fields = {}
+            self._fields_gen = gen
         self._restarts = 0
         if self._ensure_alive():
             self._requests.put(self._open_msg)
+            self._send_fields()
+
+    def set_field(self, gen: int, page: int, xref: int, value: str) -> None:
+        """Cambia un campo nel documento in memoria del processo di render (il file non si tocca)."""
+        if gen != self._fields_gen:
+            return
+        msg = ("field", gen, page, xref, value)
+        self._fields[xref] = msg
+        if self._ensure_alive():
+            self._requests.put(msg)
+
+    def _send_fields(self) -> None:
+        for msg in self._fields.values():
+            self._requests.put(msg)
 
     def close(self, gen: int, wait: bool = False) -> bool:
         """Chiude il documento; con `wait` aspetta che il file sia davvero rilasciato.
@@ -102,6 +127,7 @@ class _ResultReader(QThread):
 
     page_ready = Signal(int, int, float, QImage)
     failed = Signal(int, str)
+    field_applied = Signal(int, int)
 
     def __init__(self, results, on_closed) -> None:
         super().__init__()
@@ -119,5 +145,7 @@ class _ResultReader(QThread):
                 self.page_ready.emit(gen, page, scale, image)
             elif msg[0] == "error":
                 self.failed.emit(msg[1], msg[2])
+            elif msg[0] == "field":
+                self.field_applied.emit(msg[1], msg[2])
             elif msg[0] == "closed":
                 self._on_closed(msg[1])
