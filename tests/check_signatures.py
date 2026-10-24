@@ -16,7 +16,7 @@ OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parent / "out"
 
 def main():
     from PySide6.QtCore import QPoint, Qt
-    from PySide6.QtGui import QColor, QImage, QPainter, QPen
+    from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QDialogButtonBox, QMessageBox
 
@@ -81,7 +81,12 @@ def main():
 
     # --- Scrivi ---
     fonts = script_fonts()
-    check("font calligrafici di Windows disponibili", len(fonts) >= 3, str(fonts))
+    if sys.platform == "win32":
+        check("font calligrafici di Windows disponibili", len(fonts) >= 3, str(fonts))
+    else:
+        # Fuori da Windows (esecutore su Linux) i font di sistema non ci sono: si usa il font di base.
+        print("SKIP font calligrafici di Windows (non Windows)", flush=True)
+        fonts = fonts or [QFont().family()]
     dialog = SignatureDialog(store, Kind.INITIALS)
     dialog.show()
     dialog.tabs.setCurrentWidget(dialog.type_tab)
