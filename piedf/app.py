@@ -6,6 +6,8 @@ from PySide6.QtWidgets import QApplication
 from piedf import __version__
 from piedf.main_window import MainWindow
 
+# Nell'exe __file__ punta dentro la cartella scompattata (sys._MEIPASS/piedf/), dove
+# piedf.spec copia piedf/assets: lo stesso percorso vale sia da sorgente sia congelato.
 ASSETS = Path(__file__).parent / "assets"
 
 
