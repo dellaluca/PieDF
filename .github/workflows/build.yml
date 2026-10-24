@@ -1,0 +1,63 @@
+# Controlli su ogni branch (il risultato si vede nella PR): genera i PDF di
+# prova ed esegue tutti i tests/check_*.py su Windows, la piattaforma vera di
+# PieDF. Una PR rossa non va unita.
+#
+# Parte a ogni push su un branch che non è main. I push dell'esecutore
+# (GITHUB_TOKEN) non fanno partire workflow: per quelli il build lo avvia
+# l'esecutore stesso con workflow_dispatch.
+#
+# Nota minuti: sui repo privati i runner Windows contano il doppio
+# (circa 4 minuti di lavoro = 8 minuti dei 2000 mensili del piano Free).
+name: "Build"
+
+on:
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  controlli:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONIOENCODING: utf-8
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Dipendenze
+        run: pip install -r requirements.txt
+
+      - name: Compila
+        run: python -m compileall -q piedf tests
+
+      - name: PDF di prova
+        run: python tests/make_test_pdfs.py
+
+      - name: Controlli end-to-end
+        run: |
+          esito=0
+          for f in tests/check_*.py; do
+            echo "::group::$f"
+            if ! timeout 600 python -u "$f"; then
+              echo "::error file=$f::$f non superato"
+              esito=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $esito
