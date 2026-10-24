@@ -14,6 +14,7 @@ Lettore PDF desktop leggero e portatile con firma visiva stile Acrobat "Firma".
 - **Font per "Scrivi"**: si usano i font calligrafici presenti in ogni Windows 10/11 (Segoe Script, Segoe Print, Ink Free, Gabriola), registrati da `%WINDIR%\Fonts` se Qt non li vede. Nessun font incluso nell'exe: la firma diventa comunque un PNG.
 - **Elaborazione immagini senza numpy**: solo Qt + `bytes.translate` (velocità C). Non aggiungere numpy per questo.
 - **Documento nella GUI**: la GUI apre il PDF solo per leggere dimensioni pagine e password, poi lo chiude (niente file bloccati su Windows).
+- **Coordinate delle firme piazzate**: `Placement.rect` è in punti PDF, nello spazio della pagina come si vede (dopo /Rotate), origine in alto a sinistra: lo stesso di `page.rect` in PyMuPDF e di `PdfDocument.page_sizes`. Le conversioni verso lo schermo sono in `PdfView` (`page_at`, `to_page_point`, `page_rect_to_viewport`). I posizionamenti stanno in `Placements` (modello senza widget, con `QUndoStack`: "modificato" = stack non pulito); si svuotano aprendo o chiudendo un documento.
 
 ## Struttura
 
@@ -28,6 +29,7 @@ Lettore PDF desktop leggero e portatile con firma visiva stile Acrobat "Firma".
 - `piedf/signatures.py` – archivio firme (`<dati>/firme/*.png`, tipo nel prefisso `firma_` / `iniziali_`) e trattamento immagini (sfondo trasparente, ritaglio)
 - `piedf/signature_dialog.py` – dialog "Crea firma": Disegna / Scrivi / Immagine
 - `piedf/signature_manager.py` – dialog "Le mie firme": elenco, nuova, elimina
+- `piedf/placements.py` – firme piazzate sul documento (`Placement`, `Placements`), comandi annulla/ripeti, dimensione predefinita
 - `piedf/assets/` – icona e risorse incluse nell'exe
 - `tests/` – `make_test_pdfs.py` genera PDF di prova in `tests/out/` (ignorata da git); `check_<area>.py` sono i controlli end-to-end offscreen (`check_viewer.py`, `check_signatures.py`, …): uscita 1 se qualcosa fallisce, i controlli solo-Windows si saltano altrove
 - `.github/claude/` – istruzioni di orchestratore ed esecutore; `.github/workflows/` – worker e build (li modifica solo la sessione locale)
