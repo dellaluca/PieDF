@@ -29,7 +29,9 @@ Lettore PDF desktop leggero e portatile con firma visiva stile Acrobat "Firma".
 - `piedf/signature_dialog.py` – dialog "Crea firma": Disegna / Scrivi / Immagine
 - `piedf/signature_manager.py` – dialog "Le mie firme": elenco, nuova, elimina
 - `piedf/assets/` – icona e risorse incluse nell'exe
-- `tests/` – `make_test_pdfs.py` genera PDF di prova in `tests/out/`, `check_viewer.py` controlla il viewer end-to-end (offscreen)
+- `tests/` – `make_test_pdfs.py` genera PDF di prova in `tests/out/` (ignorata da git); `check_<area>.py` sono i controlli end-to-end offscreen (`check_viewer.py`, `check_signatures.py`, …): uscita 1 se qualcosa fallisce, i controlli solo-Windows si saltano altrove
+- `.github/claude/` – istruzioni di orchestratore ed esecutore; `.github/workflows/` – worker e build (li modifica solo la sessione locale)
+- `docs/automazione.md` – come funzionano e si configurano i worker
 
 ## Workflow
 
