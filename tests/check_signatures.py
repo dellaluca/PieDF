@@ -194,7 +194,9 @@ def main():
     from piedf.main_window import MainWindow
     w = MainWindow()
     menus = {a.text(): [x.text() for x in a.menu().actions()] for a in w.menuBar().actions()}
-    check("menu Firma", menus.get("F&irma") == ["Crea &firma…", "Crea &iniziali…", "", "&Gestisci firme…"], str(menus.get("F&irma")))
+    check("menu Firma", menus.get("F&irma") == [
+        "Crea &firma…", "Crea &iniziali…", "", "&Gestisci firme…", "", "Aggiungi &testo", "Aggiungi &data",
+    ], str(menus.get("F&irma")))
     w.close()
 
     print(f"\n{sum(results)}/{len(results)} ok", flush=True)

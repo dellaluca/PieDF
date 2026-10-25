@@ -29,6 +29,8 @@ risposta a un needs-info ───┘    legge ticket e CLAUDE.md  ignora  → c
 
 Le PR non si uniscono mai da sole: le rivedi e le unisci tu.
 
+Se il **Build su Windows** fallisce su una PR dei worker, il job "ritenta" commenta la PR con le righe `FAIL` e rilancia l'esecutore su quella PR, al massimo **2 volte** per PR. Dopo due tentativi si ferma: serve un'occhiata a mano. I worker lanciano tutti i controlli con `python tests/run_all.py`.
+
 Se la sessione finisce lasciando commit o modifiche non pubblicati sul runner, il workflow li pubblica lui e apre una PR in bozza "Bozza da salvataggio automatico per #N", da controllare. La trascrizione completa di ogni sessione è tra gli artifact dell'esecuzione (14 giorni): serve a capire cosa è andato storto, perché nel log l'output di Claude è nascosto.
 
 ### Etichette

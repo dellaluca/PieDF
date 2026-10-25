@@ -1,9 +1,15 @@
+import re
 from dataclasses import dataclass, field
 
 import pymupdf
 
 A4 = (595.0, 842.0)
 OFF = "Off"  # valore di una casella o di un gruppo radio senza spunta
+
+# Annotazioni modificabili di PieDF: si riconoscono dal titolo (/T).
+PIEDF_TITLE = "PieDF"
+FONTS = ("Helv", "TiRo", "Cour")  # Helvetica, Times, Courier: font standard PDF, niente da incorporare
+LINE_HEIGHT = 1.2  # interlinea di MuPDF nelle FreeText, in multipli della dimensione del font
 
 TEXT = pymupdf.PDF_WIDGET_TYPE_TEXT
 CHECKBOX = pymupdf.PDF_WIDGET_TYPE_CHECKBOX
@@ -59,6 +65,28 @@ class FormField:
         return self.on_state is not None and self.value == self.on_state
 
 
+@dataclass(eq=False)  # confronto per identità, come Placement
+class Annotation:
+    """Annotazione modificabile di PieDF (titolo "PieDF"). Base comune: il disegno (#22) aggiunge Ink."""
+
+    page: int  # indice da 0
+    # Punti PDF (x0, y0, x1, y1), pagina come si vede: lo stesso spazio di `Placement.rect`.
+    rect: tuple[float, float, float, float]
+    xref: int = 0  # 0 = non ancora nel file
+
+
+@dataclass(eq=False)
+class TextBox(Annotation):
+    """Casella di testo, salvata come annotazione FreeText."""
+
+    subtype = "FreeText"
+    text: str = ""
+    font: str = "Helv"  # uno di FONTS
+    size: float = 11.0
+    color: str = "#000000"
+    align: int = 0  # 0 sinistra, 1 centro, 2 destra
+
+
 @dataclass
 class PdfDocument:
     path: str
@@ -68,6 +96,7 @@ class PdfDocument:
     repaired: bool
     fields: list[FormField] = field(default_factory=list)
     xfa: bool = False  # modulo XFA: i campi non si leggono
+    annotations: list[Annotation] = field(default_factory=list)  # solo quelle di PieDF
 
 
 def open_document(path: str, password: str | None = None) -> PdfDocument:
@@ -100,7 +129,8 @@ def open_document(path: str, password: str | None = None) -> PdfDocument:
             raise OpenError("Nessuna pagina leggibile.")
         xfa = _has_xfa(doc)
         fields = [] if xfa else _read_fields(doc)
-        return PdfDocument(path, password, sizes, doc.is_repaired or broken > 0, fields, xfa)
+        annotations = _read_annotations(doc)
+        return PdfDocument(path, password, sizes, doc.is_repaired or broken > 0, fields, xfa, annotations)
     finally:
         # Chiudere subito evita di tenere il file bloccato su Windows.
         doc.close()
@@ -232,3 +262,112 @@ def _states(doc, xref: int) -> set[str]:
     elif kind != "dict":
         return set()
     return {part.split()[0].rstrip(">") for part in value.split("/")[1:] if part.split()}
+
+
+# --- Annotazioni di PieDF ---------------------------------------------------------------
+
+
+def is_piedf_annot(annot) -> bool:
+    """Annotazione creata da PieDF (e quindi modificabile qui): per ora solo le FreeText."""
+    return annot.type[0] == pymupdf.PDF_ANNOT_FREE_TEXT and annot.info.get("title") == PIEDF_TITLE
+
+
+def piedf_annots(page) -> list:
+    return [a for a in page.annots() if is_piedf_annot(a)]
+
+
+def _read_annotations(doc) -> list[Annotation]:
+    """Annotazioni di PieDF di tutte le pagine; quelle di altri programmi restano nel render."""
+    items = []
+    for index in range(doc.page_count):
+        try:
+            # Senza /Annots la pagina non si carica nemmeno: veloce anche con centinaia di pagine.
+            if doc.xref_get_key(doc.page_xref(index), "Annots")[0] == "null":
+                continue
+            page = doc[index]
+            annots = piedf_annots(page)
+        except Exception:
+            continue
+        for annot in annots:
+            try:
+                items.append(_read_text_box(doc, page, index, annot))
+            except Exception:
+                pass
+    return items
+
+
+def _read_text_box(doc, page, index: int, annot) -> TextBox:
+    da = doc.xref_get_key(annot.xref, "DA")[1]
+    font_match = re.search(r"/(\w+)\s+([\d.]+)\s+Tf", da)
+    font = font_match.group(1) if font_match and font_match.group(1) in FONTS else FONTS[0]
+    size = float(font_match.group(2)) if font_match else 11.0
+    q = doc.xref_get_key(annot.xref, "Q")
+    rect = annot.rect * page.rotation_matrix
+    return TextBox(
+        page=index,
+        rect=(rect.x0, rect.y0, rect.x1, rect.y1),
+        xref=annot.xref,
+        text=annot.info.get("content", ""),
+        font=font,
+        size=size,
+        color=_da_color(da),
+        align=int(q[1]) if q[0] == "int" and q[1] in ("0", "1", "2") else 0,
+    )
+
+
+def _da_color(da: str) -> str:
+    rgb = re.search(r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+rg", da)
+    if rgb:
+        values = [float(v) for v in rgb.groups()]
+    else:
+        gray = re.search(r"([\d.]+)\s+g\b", da)
+        values = [float(gray.group(1))] * 3 if gray else [0.0] * 3
+    return "#" + "".join(f"{max(0, min(255, round(v * 255))):02x}" for v in values)
+
+
+def _rgb(color: str) -> tuple[float, float, float]:
+    return tuple(int(color[i:i + 2], 16) / 255 for i in (1, 3, 5))
+
+
+def add_text_box(page, box: TextBox):
+    """Scrive la casella come FreeText di PieDF sulla pagina (rettangolo come si vede, testo dritto)."""
+    x0, y0, x1, y1 = box.rect
+    annot = page.add_freetext_annot(
+        pymupdf.Rect(x0, y0, x1, y1) * page.derotation_matrix,  # come le firme in writer.py
+        box.text,
+        fontsize=box.size,
+        fontname=box.font,
+        text_color=_rgb(box.color),
+        align=box.align,
+        rotate=page.rotation,  # testo dritto sulle pagine ruotate
+    )
+    annot.set_info(title=PIEDF_TITLE)
+    annot.set_flags(pymupdf.PDF_ANNOT_IS_PRINT)
+    # PyMuPDF scrive una linea di richiamo (/CL) anche senza `callout`: qualche lettore la disegna.
+    page.parent.xref_set_key(annot.xref, "CL", "null")
+    return annot
+
+
+def text_box_lines(text: str, font: str, size: float, width: float) -> int:
+    """Righe del testo a capo automatico nella larghezza data, contate come le impagina MuPDF."""
+    doc = pymupdf.open()
+    try:
+        page = doc.new_page(width=max(width, 1.0), height=14400)
+        annot = page.add_freetext_annot(page.rect, text, fontsize=size, fontname=font)
+        ap = doc.xref_get_key(annot.xref, "AP/N")[1]
+        stream = doc.xref_stream(int(ap.split()[0]))
+        # Un "Td" iniziale e poi uno per riga, anche per le righe vuote.
+        return max(1, stream.count(b" Td\n") - 1)
+    finally:
+        doc.close()
+
+
+def longest_word(text: str, font: str, size: float) -> float:
+    """Larghezza in punti della parola più lunga (+1 di margine): sotto, MuPDF la taglierebbe."""
+    words = text.split()
+    return max((pymupdf.get_text_length(w, fontname=font, fontsize=size) for w in words), default=0.0) + 1.0
+
+
+def text_box_height(text: str, font: str, size: float, width: float) -> float:
+    """Altezza in punti che contiene tutto il testo: l'altezza della casella segue il testo."""
+    return text_box_lines(text, font, size, width) * LINE_HEIGHT * size
