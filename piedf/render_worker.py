@@ -23,6 +23,7 @@ None per le coordinate che la destinazione non indica) oppure "uri" (esterno: `u
 così com'è, anche file:, launch e link ad altri PDF; decide la GUI cosa seguire).
 
 La stampa (#25) usa un secondo processo, `print_pages`, che non tocca quello delle pagine visibili.
+Le miniature di "Organizza pagine" (#26) un altro ancora, `thumbnails`, che apre anche i file inseriti.
 """
 
 import math
@@ -127,6 +128,50 @@ def print_pages(path, password, items, acks, results) -> None:
         results.put(("page", n, pix.width, pix.height, pix.stride, pix.samples))
         del pix
     doc.close()
+
+
+def thumbnails(requests, results) -> None:
+    """Processo delle miniature di "Organizza pagine" (#26): pagine anche di altri file.
+
+    Messaggi in ingresso: ("source", id, path, password), ("want", [(id, page, scale), ...])
+    che sostituisce la lista precedente (si disegna solo quello che si vede), ("quit",).
+    In uscita: ("thumb", id, page, width, height, stride, samples_rgb), ("error", id, page, messaggio).
+    """
+    import pymupdf
+
+    sources = {}
+    docs = {}
+    wanted: list[tuple[int, int, float]] = []
+    while True:
+        msg = requests.get() if not wanted else _get_nowait(requests)
+        while msg is not None:
+            if msg[0] == "quit":
+                for doc in docs.values():
+                    doc.close()
+                # Le miniature non ancora lette non servono più: senza questo il processo
+                # aspetterebbe all'uscita che la GUI le legga.
+                results.cancel_join_thread()
+                return
+            if msg[0] == "source":
+                sources[msg[1]] = (msg[2], msg[3])
+            elif msg[0] == "want":
+                wanted = list(msg[1])
+            msg = _get_nowait(requests)
+        if not wanted:
+            continue
+        sid, page, scale = wanted.pop(0)
+        try:
+            doc = docs.get(sid)
+            if doc is None:
+                path, password = sources[sid]
+                doc = pymupdf.open(path)
+                if doc.needs_pass and not doc.authenticate(password or ""):
+                    raise ValueError("Password errata")
+                docs[sid] = doc
+            pix = doc[page].get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False, annots=True)
+            results.put(("thumb", sid, page, pix.width, pix.height, pix.stride, pix.samples))
+        except Exception as e:
+            results.put(("error", sid, page, str(e)))
 
 
 def _links(doc, index: int) -> list[dict]:
