@@ -22,7 +22,7 @@ concurrency:
 jobs:
   release:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60  # c'è anche l'attesa dell'approvazione su SignPath (fino a 30 min)
     env:
       PYTHONIOENCODING: utf-8
       GH_TOKEN: ${{ github.token }}
