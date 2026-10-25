@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
+from multiprocessing import shared_memory
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -510,7 +511,7 @@ def main():
           and any(f["title"] == PIEDF_TITLE for f in inks(path)))
     results_q, acks = queue.Queue(), queue.Queue()
     try:
-        from multiprocessing import shared_memory
+        # Le pagine arrivano nella memoria condivisa (#34), non nel messaggio.
         shm = shared_memory.SharedMemory(create=True, size=595 * 842 * 3 * 2)
         render_worker.print_pages(path, None, [(0, 1.0)], [shm.name], acks, results_q)
         msg = results_q.get(timeout=10)
