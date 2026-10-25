@@ -19,6 +19,8 @@ class Renderer(QObject):
     links_ready = Signal(int, int, list)  # gen, pagina, link (vedi render_worker)
     failed = Signal(int, str)  # gen, messaggio
     field_applied = Signal(int, int)  # gen, pagina: il campo è nel documento, la pagina va ridisegnata
+    search_hits = Signal(int, int, int, list)  # gen, id della ricerca, pagina, rettangoli (vedi render_worker)
+    search_done = Signal(int, int, bool)  # gen, id della ricerca, almeno una pagina ha testo
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -27,6 +29,7 @@ class Renderer(QObject):
         self._results = self._ctx.Queue()
         self._process = None
         self._open_msg = None
+        self._search_msg = None  # ricerca da rilanciare se il processo riparte
         # Valori dei campi già mandati per il documento aperto (xref → messaggio):
         # si rimandano se il processo riparte o riapre il file.
         self._fields: dict[int, tuple] = {}
@@ -41,6 +44,8 @@ class Renderer(QObject):
         self._reader.links_ready.connect(self.links_ready)
         self._reader.failed.connect(self.failed)
         self._reader.field_applied.connect(self.field_applied)
+        self._reader.search_hits.connect(self.search_hits)
+        self._reader.search_done.connect(self.search_done)
         self._reader.start()
 
     def _start_process(self) -> None:
@@ -59,11 +64,14 @@ class Renderer(QObject):
         if self._open_msg is not None:
             self._requests.put(self._open_msg)
             self._send_fields()
+            if self._search_msg is not None:
+                self._requests.put(self._search_msg)
         return True
 
     def open(self, gen: int, path: str, password: str | None) -> None:
         """Apre il documento. Riaprendo lo stesso `gen` (salvataggio fallito) i campi cambiati restano."""
         self._open_msg = ("open", gen, path, password)
+        self._search_msg = None
         if gen != self._fields_gen:
             self._fields = {}
             self._fields_gen = gen
@@ -92,6 +100,7 @@ class Renderer(QObject):
         Restituisce False se il processo non ha risposto in tempo.
         """
         self._open_msg = None
+        self._search_msg = None
         if not self._process.is_alive():
             return True
         with self._closed:
@@ -119,6 +128,14 @@ class Renderer(QObject):
         if self._ensure_alive():
             self._requests.put(("links", gen, page))
 
+    def search(self, gen: int, search_id: int, text: str, case: bool, start: int) -> None:
+        """Cerca `text` in tutte le pagine, a partire da `start`; annulla la ricerca in corso.
+        Testo vuoto = ferma la ricerca."""
+        msg = ("search", gen, search_id, text, case, start)
+        self._search_msg = msg if text.strip() else None
+        if self._ensure_alive():
+            self._requests.put(msg)
+
     def shutdown(self) -> None:
         self._requests.put(("quit",))
         self._results.put(None)
@@ -135,6 +152,8 @@ class _ResultReader(QThread):
     links_ready = Signal(int, int, list)
     failed = Signal(int, str)
     field_applied = Signal(int, int)
+    search_hits = Signal(int, int, int, list)
+    search_done = Signal(int, int, bool)
 
     def __init__(self, results, on_closed) -> None:
         super().__init__()
@@ -156,5 +175,9 @@ class _ResultReader(QThread):
                 self.failed.emit(msg[1], msg[2])
             elif msg[0] == "field":
                 self.field_applied.emit(msg[1], msg[2])
+            elif msg[0] == "hits":
+                self.search_hits.emit(msg[1], msg[2], msg[3], msg[4])
+            elif msg[0] == "search_done":
+                self.search_done.emit(msg[1], msg[2], msg[3])
             elif msg[0] == "closed":
                 self._on_closed(msg[1])

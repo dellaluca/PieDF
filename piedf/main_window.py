@@ -37,6 +37,7 @@ from piedf.placements import Placements
 from piedf.positions import Positions
 from piedf.printing import NO_PRINT_MESSAGE, PrintJob, PrintOptions, PrintOptionsDialog, can_print, print_source, selected_pages
 from piedf.renderer import Renderer
+from piedf.search_bar import SearchBar
 from piedf.signature_dialog import SignatureDialog
 from piedf.signature_manager import SignatureManager, thumbnail_pixmap
 from piedf.signatures import Kind, Signature, SignatureStore
@@ -122,6 +123,9 @@ class MainWindow(QMainWindow):
         self.view.text_box_changed.connect(self._update_text_bar)
         self.view.text_style = self._text_style()
         self.view.set_highlight(self._settings.value("highlight_fields", True, type=bool))
+        self.search_bar = SearchBar(self.view, self._renderer, self.annotations)
+        self.search_bar.show_hit.connect(self._show_search_hit)
+        self.search_bar.toggled.connect(self._place_text_bar)
         self._build_form_bar()
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -183,6 +187,9 @@ class MainWindow(QMainWindow):
             "Aggiungi &data", lambda: self.view.start_text_tool(QDate.currentDate().toString("dd/MM/yyyy"))
         )
         self.act_forward = self._action("A&vanti", self.go_forward, ["Alt+Right"])
+        self.act_find = self._action("&Trova…", self.search_bar.open_bar, [QKeySequence.StandardKey.Find])
+        self.act_find_next = self._action("Trova &successivo", self.search_bar.next, ["F3"])
+        self.act_find_prev = self._action("Trova &precedente", self.search_bar.previous, ["Shift+F3"])
 
         self.act_organize = self._action("&Organizza pagine…", lambda: self.organize_pages(), ["Ctrl+Shift+O"])
         self.act_merge = self._action("&Unisci PDF…", self.merge_files)
@@ -202,6 +209,7 @@ class MainWindow(QMainWindow):
             self.act_save_as, self.act_print, self.act_close, self.act_zoom_in, self.act_zoom_out, self.act_actual,
             self.act_fit_page, self.act_fit_width, self.act_prev, self.act_next, self.act_goto,
             self.act_text, self.act_date, self.act_organize, self.act_rotate_left, self.act_rotate_right,
+            self.act_find, self.act_find_next, self.act_find_prev,
         ]
 
     def _build_menu(self) -> None:
@@ -222,6 +230,10 @@ class MainWindow(QMainWindow):
         edit_menu = self.menuBar().addMenu("&Modifica")
         edit_menu.addAction(self.act_undo)
         edit_menu.addAction(self.act_redo)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.act_find)
+        edit_menu.addAction(self.act_find_next)
+        edit_menu.addAction(self.act_find_prev)
 
         view_menu = self.menuBar().addMenu("&Visualizza")
         for action in (self.act_zoom_in, self.act_zoom_out, self.act_actual):
@@ -398,15 +410,39 @@ class MainWindow(QMainWindow):
         self._place_text_bar()
 
     def _place_text_bar(self) -> None:
+        """In alto a destra; con la barra di ricerca aperta, sotto di lei."""
         bar, viewport = self.text_bar, self.view.viewport()
         bar.adjustSize()
         x = viewport.x() + max(0, viewport.width() - bar.width() - 8)
-        bar.move(x, viewport.y() + 8)
+        y = viewport.y() + 8
+        if self.search_bar.isVisible():
+            y = self.search_bar.geometry().bottom() + 5
+        bar.move(x, y)
 
     def eventFilter(self, obj, event) -> bool:
-        if obj is self.view and event.type() == QEvent.Type.Resize and self.text_bar.isVisible():
-            self._place_text_bar()
+        if obj is self.view and event.type() == QEvent.Type.Resize:
+            if self.search_bar.isVisible():
+                self.search_bar.place()
+            if self.text_bar.isVisible():
+                self._place_text_bar()
         return super().eventFilter(obj, event)
+
+    # --- Ricerca ----------------------------------------------------------------------
+
+    def _show_search_hit(self, page: int, rect, first: bool) -> None:
+        """Porta in vista un risultato; il primo salto di una ricerca si può annullare con Indietro."""
+        if first:
+            self._back = (self._back + [self.view.scroll_position()])[-MAX_HISTORY:]
+            self._forward = []
+            self._update_enabled()
+        self.view.scroll_to_rect(page, rect)
+
+    def keyPressEvent(self, event) -> None:
+        # Esc arriva qui se la vista non lo usa (nessuno strumento, niente selezionato).
+        if event.key() == Qt.Key.Key_Escape and self.search_bar.isVisible():
+            self.search_bar.close_bar()
+        else:
+            super().keyPressEvent(event)
 
     def _build_form_bar(self) -> None:
         """Barra sottile sopra la vista, solo per i documenti con campi compilabili."""
@@ -530,6 +566,7 @@ class MainWindow(QMainWindow):
         self.forms.set_fields(doc.fields)
         self.annotations.set_items(doc.annotations)
         self._update_form_bar(doc)
+        self.search_bar.reset(self._gen)
         self._page_box.setRange(1, len(doc.page_sizes))
         self._page_total.setText(f" / {len(doc.page_sizes)} ")
         self._update_title()
@@ -553,6 +590,7 @@ class MainWindow(QMainWindow):
         self.forms.set_fields([])
         self.annotations.set_items([])
         self._update_form_bar(None)
+        self.search_bar.reset(self._gen)
         self._page_box.setRange(0, 0)
         self._page_total.setText(" / 0 ")
         self._update_title()

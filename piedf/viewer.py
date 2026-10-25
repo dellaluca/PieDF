@@ -47,6 +47,8 @@ SELECTION = QColor("#1a73e8")
 HANDLE = 8  # lato delle maniglie, px logici
 PREVIEW_OPACITY = 0.6
 FIELD_HIGHLIGHT = QColor(214, 224, 255)  # azzurro chiaro, come in Acrobat (in modalità Multiply)
+SEARCH_HIT = QColor(255, 210, 0, 110)  # risultati della ricerca: giallo semitrasparente
+SEARCH_CURRENT = QColor(255, 120, 0, 150)  # risultato corrente: arancione
 FIELD_FONT_PT = 12.0  # font dell'editor per i campi a dimensione automatica (massimo)
 ALIGNMENTS = [Qt.AlignmentFlag.AlignLeft, Qt.AlignmentFlag.AlignHCenter, Qt.AlignmentFlag.AlignRight]
 # Angoli in senso orario da in alto a sinistra: maniglie e cursori corrispondenti.
@@ -120,6 +122,9 @@ class PdfView(QAbstractScrollArea):
         self._last_request: list[tuple[int, float]] | None = None
         self._links: dict[int, list[PageLink]] = {}  # pagine i cui link sono già arrivati
         self._links_pending: set[int] = set()
+        # Risultati della ricerca (#14) per pagina, in punti PDF, e quello corrente (pagina, rettangolo).
+        self._search_hits: dict[int, list[QRectF]] = {}
+        self._search_current: tuple[int, QRectF] | None = None
 
         self._placements = Placements(self)
         self._placements.changed.connect(self.viewport().update)
@@ -232,6 +237,26 @@ class PdfView(QAbstractScrollArea):
         self._highlight = on
         self.viewport().update()
 
+    def set_search_hits(self, hits: dict[int, list[QRectF]], current: tuple[int, QRectF] | None) -> None:
+        """Evidenziazioni della ricerca: solo disegnate, non cambiano i clic."""
+        self._search_hits = hits
+        self._search_current = current
+        self.viewport().update()
+
+    def scroll_to_rect(self, index: int, rect_pt: QRectF) -> None:
+        """Porta in vista il rettangolo (punti PDF) della pagina `index`, a un terzo dall'alto se era
+        fuori; in orizzontale (zoom) lo centra se esce dai lati."""
+        if not self._sizes or not 0 <= index < len(self._sizes):
+            return
+        rect = self.page_rect_to_viewport(index, rect_pt)
+        view = QRectF(self.viewport().rect())
+        vbar, hbar = self.verticalScrollBar(), self.horizontalScrollBar()
+        if rect.top() < 0 or rect.bottom() > view.bottom():
+            vbar.setValue(round(vbar.value() + rect.top() - view.height() / 3))
+        if rect.left() < 0 or rect.right() > view.right():
+            hbar.setValue(round(hbar.value() + rect.center().x() - view.width() / 2))
+        self._update_current_page()
+
     def commit_editor(self) -> None:
         """Conferma il testo in corso nell'editor (prima di salvare o chiudere)."""
         self._close_editor(commit=True)
@@ -343,6 +368,7 @@ class PdfView(QAbstractScrollArea):
 
     def set_document(self, gen: int, page_sizes: list[tuple[float, float]]) -> None:
         self._reset_interaction()
+        self._search_hits, self._search_current = {}, None
         self._gen = gen
         self._sizes = page_sizes
         self._clear_cache()
@@ -364,6 +390,7 @@ class PdfView(QAbstractScrollArea):
 
     def clear(self) -> None:
         self._reset_interaction()
+        self._search_hits, self._search_current = {}, None
         self._gen += 1
         self._sizes = []
         self._clear_cache()
@@ -600,12 +627,21 @@ class PdfView(QAbstractScrollArea):
             else:
                 # Render vecchio (zoom appena cambiato) o ridotto: si stira finché arriva quello giusto.
                 painter.drawImage(QRectF(rect), image)
+        self._paint_search(painter)
         self._paint_fields(painter)
         self._paint_placements(painter)
         self._paint_annotations(painter)
         painter.end()
 
         self._request_visible()
+
+    def _paint_search(self, painter: QPainter) -> None:
+        current = self._search_current
+        for page in self._visible_range():
+            for rect in self._search_hits.get(page, ()):
+                is_current = current is not None and current[0] == page and current[1] == rect
+                color = SEARCH_CURRENT if is_current else SEARCH_HIT
+                painter.fillRect(self.page_rect_to_viewport(page, rect), color)
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:
         self.viewport().update()
@@ -1059,13 +1095,7 @@ class PdfView(QAbstractScrollArea):
 
     def _ensure_visible(self, field: FormField) -> None:
         """Porta il campo in vista (a un terzo dall'alto se era fuori)."""
-        rect = self.page_rect_to_viewport(field.page, self._field_rect(field))
-        view = QRectF(self.viewport().rect())
-        vbar, hbar = self.verticalScrollBar(), self.horizontalScrollBar()
-        if rect.top() < 0 or rect.bottom() > view.bottom():
-            vbar.setValue(round(vbar.value() + rect.top() - view.height() / 3))
-        if rect.left() < 0 or rect.right() > view.right():
-            hbar.setValue(round(hbar.value() + rect.center().x() - view.width() / 2))
+        self.scroll_to_rect(field.page, self._field_rect(field))
 
     def _open_editor(self, field: FormField, select_all: bool) -> None:
         self._close_editor(commit=True)
