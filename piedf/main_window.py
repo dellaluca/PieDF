@@ -1,8 +1,8 @@
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
+from PySide6.QtCore import QDate, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QIcon, QKeySequence, QPixmap
 from PySide6.QtPrintSupport import QAbstractPrintDialog, QPrintDialog, QPrinter, QPrinterInfo
 from PySide6.QtWidgets import (
     QComboBox,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from piedf import paths
+from piedf.annotations import COLORS, DEFAULT_STYLE, FONT_LABELS, MAX_SIZE, MIN_SIZE, Annotations
 from piedf.document import OpenError, PasswordRequired, PdfDocument, open_document
 from piedf.forms import FormValues
 from piedf.placements import Placements
@@ -46,6 +47,9 @@ FIT_LABELS = {FitMode.WIDTH: "Adatta larghezza", FitMode.PAGE: "Adatta pagina"}
 ZOOM_PRESETS = [50, 75, 100, 125, 150, 200, 300, 400]
 MENU_THUMB = QSize(160, 52)
 PLACING_HINT = "Clic per posizionare la firma · Esc per annullare"
+TEXT_HINT = "Clic sulla pagina per scrivere · Esc per annullare"
+DATE_HINT = "Clic sulla pagina per inserire la data · Esc per annullare"
+ALIGN_LABELS = ["Sinistra", "Centro", "Destra"]
 FORM_MESSAGE = "Questo documento contiene campi compilabili."
 XFA_MESSAGE = "Questo modulo usa una tecnologia (XFA) che PieDF non supporta: i campi non si possono compilare."
 MAX_HISTORY = 50
@@ -84,6 +88,7 @@ class MainWindow(QMainWindow):
         self.placements.undo_stack.cleanChanged.connect(self._update_enabled)
         # Stesso stack delle firme: annulla/ripeti e "modificato" valgono per tutto.
         self.forms = FormValues(self.placements.undo_stack, self)
+        self.annotations = Annotations(self.placements.undo_stack, self)
         self._path: str | None = None
         self._password: str | None = None
         self._save_path: str | None = None  # dove scrive "Salva"; None finché non si è salvato
@@ -103,6 +108,10 @@ class MainWindow(QMainWindow):
         self.view.link_uri.connect(self._open_uri)
         self.view.set_placements(self.placements)
         self.view.set_forms(self.forms)
+        self.view.set_annotations(self.annotations)
+        self.view.text_tool_changed.connect(self._on_text_tool_changed)
+        self.view.text_box_changed.connect(self._update_text_bar)
+        self.view.text_style = self._text_style()
         self.view.set_highlight(self._settings.value("highlight_fields", True, type=bool))
         self._build_form_bar()
         central = QWidget()
@@ -121,6 +130,7 @@ class MainWindow(QMainWindow):
         self._build_actions()
         self._build_menu()
         self._build_toolbar()
+        self._build_text_bar()
         self._update_title()
         self._update_enabled()
 
@@ -159,6 +169,10 @@ class MainWindow(QMainWindow):
         )
         self.act_goto = self._action("&Vai a pagina…", self._focus_page_box, ["Ctrl+G"])
         self.act_back = self._action("I&ndietro", self.go_back, ["Alt+Left"])
+        self.act_text = self._action("Aggiungi &testo", self.view.start_text_tool, ["Ctrl+T"])
+        self.act_date = self._action(
+            "Aggiungi &data", lambda: self.view.start_text_tool(QDate.currentDate().toString("dd/MM/yyyy"))
+        )
         self.act_forward = self._action("A&vanti", self.go_forward, ["Alt+Right"])
 
         # Il testo segue l'ultimo comando: "Annulla spostamento firma".
@@ -173,6 +187,7 @@ class MainWindow(QMainWindow):
         self._doc_actions = [
             self.act_save_as, self.act_print, self.act_close, self.act_zoom_in, self.act_zoom_out, self.act_actual,
             self.act_fit_page, self.act_fit_width, self.act_prev, self.act_next, self.act_goto,
+            self.act_text, self.act_date,
         ]
 
     def _build_menu(self) -> None:
@@ -212,6 +227,9 @@ class MainWindow(QMainWindow):
         sign_menu.addAction("Crea &iniziali…", lambda: self.create_signature(Kind.INITIALS))
         sign_menu.addSeparator()
         sign_menu.addAction("&Gestisci firme…", self.manage_signatures)
+        sign_menu.addSeparator()
+        sign_menu.addAction(self.act_text)
+        sign_menu.addAction(self.act_date)
 
     def _build_toolbar(self) -> None:
         bar = QToolBar("Strumenti")
@@ -267,8 +285,91 @@ class MainWindow(QMainWindow):
         # La freccia è già nel testo.
         self.sign_button.setStyleSheet("QToolButton::menu-indicator { image: none; }")
         bar.addWidget(self.sign_button)
+        self.act_text.setIconText("T")
+        self.act_text.setToolTip("Aggiungi testo (Ctrl+T)")
+        self.act_date.setIconText("Data")
+        self.act_date.setToolTip("Aggiungi la data di oggi")
+        bar.addAction(self.act_text)
+        bar.addAction(self.act_date)
 
         self._doc_widgets = [self._page_box, self._zoom_box, self.sign_button]
+
+    def _build_text_bar(self) -> None:
+        """Proprietà della casella di testo: visibile solo con una casella selezionata o in modifica."""
+        bar = QToolBar("Testo")
+        bar.setMovable(False)
+        bar.setFloatable(False)
+        bar.toggleViewAction().setVisible(False)
+        self.text_bar = bar
+        self.addToolBar(bar)
+        # Senza focus: l'editor della casella resta attivo mentre si cambia il formato.
+        self.font_box = QComboBox()
+        self.font_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        for font, label in FONT_LABELS.items():
+            self.font_box.addItem(label, font)
+        self.font_box.activated.connect(lambda _: self._set_text_style(font=self.font_box.currentData()))
+        bar.addWidget(self.font_box)
+        self.size_box = QSpinBox()
+        self.size_box.setRange(MIN_SIZE, MAX_SIZE)
+        self.size_box.setSuffix(" pt")
+        self.size_box.setKeyboardTracking(False)
+        self.size_box.valueChanged.connect(lambda v: self._set_text_style(size=float(v)))
+        bar.addWidget(self.size_box)
+        self.color_box = QComboBox()
+        self.color_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        for color, label in COLORS.items():
+            swatch = QPixmap(12, 12)
+            swatch.fill(QColor(color))
+            self.color_box.addItem(QIcon(swatch), label, color)
+        self.color_box.activated.connect(lambda _: self._set_text_style(color=self.color_box.currentData()))
+        bar.addWidget(self.color_box)
+        group = QActionGroup(self)
+        self.align_actions = []
+        for align, label in enumerate(ALIGN_LABELS):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.triggered.connect(lambda _=False, a=align: self._set_text_style(align=a))
+            group.addAction(action)
+            bar.addAction(action)
+            self.align_actions.append(action)
+        bar.hide()
+
+    def _text_style(self) -> dict:
+        """Formato delle prossime caselle, ricordato in settings.ini."""
+        s = self._settings
+        style = {
+            "font": s.value("text/font", DEFAULT_STYLE["font"], type=str),
+            "size": s.value("text/size", DEFAULT_STYLE["size"], type=float),
+            "color": s.value("text/color", DEFAULT_STYLE["color"], type=str),
+            "align": s.value("text/align", DEFAULT_STYLE["align"], type=int),
+        }
+        if style["font"] not in FONT_LABELS:
+            style["font"] = DEFAULT_STYLE["font"]
+        if style["color"] not in COLORS:
+            style["color"] = DEFAULT_STYLE["color"]
+        style["size"] = float(max(MIN_SIZE, min(MAX_SIZE, style["size"])))
+        style["align"] = style["align"] if 0 <= style["align"] < 3 else 0
+        return style
+
+    def _set_text_style(self, **changes) -> None:
+        for key, value in changes.items():
+            self._settings.setValue(f"text/{key}", value)
+        self.view.set_text_style(**changes)
+
+    def _update_text_bar(self, box) -> None:
+        if box is None:
+            self.text_bar.hide()
+            return
+        for widget in (self.font_box, self.size_box, self.color_box):
+            widget.blockSignals(True)
+        self.font_box.setCurrentIndex(max(0, self.font_box.findData(box.font)))
+        self.size_box.setValue(round(box.size))
+        index = self.color_box.findData(box.color)
+        self.color_box.setCurrentIndex(index)  # -1 = un colore non della lista (da un altro programma)
+        for widget in (self.font_box, self.size_box, self.color_box):
+            widget.blockSignals(False)
+        self.align_actions[box.align if 0 <= box.align < 3 else 0].setChecked(True)
+        self.text_bar.show()
 
     def _build_form_bar(self) -> None:
         """Barra sottile sopra la vista, solo per i documenti con campi compilabili."""
@@ -366,6 +467,7 @@ class MainWindow(QMainWindow):
         self._renderer.open(self._gen, path, doc.password)
         self.view.set_document(self._gen, doc.page_sizes)
         self.forms.set_fields(doc.fields)
+        self.annotations.set_items(doc.annotations)
         self._update_form_bar(doc)
         self._page_box.setRange(1, len(doc.page_sizes))
         self._page_total.setText(f" / {len(doc.page_sizes)} ")
@@ -393,6 +495,7 @@ class MainWindow(QMainWindow):
         self._renderer.close(self._gen)
         self.view.clear()
         self.forms.set_fields([])
+        self.annotations.set_items([])
         self._update_form_bar(None)
         self._page_box.setRange(0, 0)
         self._page_total.setText(" / 0 ")
@@ -407,7 +510,7 @@ class MainWindow(QMainWindow):
             return True
         name = Path(self._path).name
         Button = QMessageBox.StandardButton
-        if self.forms.changed():
+        if self.forms.changed() or self.annotations.pending() is not None:
             title, text = "Modifiche non salvate", f"Le modifiche a «{name}» non sono state salvate."
         else:
             title, text = "Firme non salvate", f"Le firme aggiunte a «{name}» non sono state salvate."
@@ -558,7 +661,8 @@ class MainWindow(QMainWindow):
             return False
         try:
             save_with_signatures(
-                src, password, self.placements.items, dest, self.placements.missing_pngs(), self.forms.changed()
+                src, password, self.placements.items, dest, self.placements.missing_pngs(), self.forms.changed(),
+                self.annotations.pending(),
             )
         except SaveError as e:
             if overwrite:
@@ -567,7 +671,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Salvataggio non riuscito", str(e))
             return False
 
-        # Le firme ora fanno parte del PDF: non sono più modificabili né annullabili (i campi sì).
+        # Le firme ora fanno parte del PDF: non sono più modificabili né annullabili (i campi sì);
+        # le caselle di testo tornano nel modello dal file riaperto, modificabili.
         page, zoom, fit = self.view.current_page, self.view.zoom, self.view.fit_mode
         scroll_x, scroll_y = self.view.horizontalScrollBar().value(), self.view.verticalScrollBar().value()
         self.placements.clear()
@@ -642,7 +747,7 @@ class MainWindow(QMainWindow):
         try:
             path, temp = print_source(
                 self._path, self._password, self.placements.items, self.placements.missing_pngs(),
-                self.forms.changed(),
+                self.forms.changed(), self.annotations.pending(),
             )
         except SaveError as e:
             QMessageBox.critical(self, "Stampa non riuscita", str(e))
@@ -781,6 +886,12 @@ class MainWindow(QMainWindow):
         if placing:
             self.statusBar().showMessage(PLACING_HINT)
         elif self.statusBar().currentMessage() == PLACING_HINT:
+            self.statusBar().clearMessage()
+
+    def _on_text_tool_changed(self, active: bool) -> None:
+        if active:
+            self.statusBar().showMessage(DATE_HINT if self.view.date_tool else TEXT_HINT)
+        elif self.statusBar().currentMessage() in (TEXT_HINT, DATE_HINT):
             self.statusBar().clearMessage()
 
     # --- File recenti -----------------------------------------------------------------

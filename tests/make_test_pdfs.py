@@ -1,4 +1,4 @@
-"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotati, firmato digitalmente, moduli, link, senza permesso di stampa."""
+"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotati, firmato digitalmente, moduli, link, senza permesso di stampa, FreeText di un altro programma."""
 import random, re, sys
 from pathlib import Path
 import pymupdf
@@ -188,6 +188,12 @@ d.xref_set_key(d.pdf_catalog(), "Names", f"<</Dests {names} 0 R>>")
 raw_link(pages[1], pymupdf.Rect(500, 300, 700, 340), f"<</S/GoTo/D[{p0.xref} 0 R/Fit]>>")
 box(pages[1], pymupdf.Rect(500, 300, 700, 340), "ruotata, verso pagina 1")
 d.save(out / "link.pdf")
+
+# Casella di testo creata da un altro programma (#7): titolo diverso da "PieDF", non modificabile.
+d = pymupdf.open(out / "semplice.pdf")
+a = d[0].add_freetext_annot(pymupdf.Rect(300, 500, 500, 530), "Nota di un altro", fontsize=14, text_color=(0, 0, 0))
+a.set_info(title="Mario Bianchi")
+d.save(out / "testo_altro.pdf")
 
 data = (out / "lungo_350.pdf").read_bytes()
 (out / "danneggiato.pdf").write_bytes(data[: len(data) // 2])  # troncato a metà: irrecuperabile

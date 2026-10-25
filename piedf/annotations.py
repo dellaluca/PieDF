@@ -109,11 +109,11 @@ class Annotations(QObject):
     def remove(self, item: Annotation) -> None:
         self.undo_stack.push(_RemoveCommand(self, item))
 
-    def update(self, item: Annotation, text: str, **changes) -> None:
-        """Cambia attributi (testo, rettangolo, formato) in un solo passo di annulla."""
+    def update(self, item: Annotation, label: str, **changes) -> None:
+        """Cambia attributi (testo, rettangolo, formato) in un solo passo di annulla, chiamato `label`."""
         old = {k: getattr(item, k) for k in changes}
         if old != changes and item in self.items:
-            self.undo_stack.push(_ChangeCommand(self, item, old, changes, text))
+            self.undo_stack.push(_ChangeCommand(self, item, old, changes, label))
 
     def set_rect(self, item: Annotation, old: QRectF, new: QRectF, text: str) -> None:
         """Registra un cambio di rettangolo già applicato dal vivo (trascinamento)."""

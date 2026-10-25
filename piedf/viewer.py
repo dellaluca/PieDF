@@ -4,11 +4,30 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
 
+import pymupdf
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QWheelEvent
-from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QComboBox, QLineEdit, QListWidget, QPlainTextEdit, QWidget
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QTextOption, QWheelEvent
+from PySide6.QtWidgets import (
+    QAbstractScrollArea,
+    QApplication,
+    QComboBox,
+    QFrame,
+    QLineEdit,
+    QListWidget,
+    QPlainTextEdit,
+    QWidget,
+)
 
-from piedf.document import COMBO, LIST, TEXT, FormField
+from piedf.annotations import (
+    DEFAULT_STYLE,
+    MIN_BOX_WIDTH,
+    NEW_BOX_WIDTH,
+    Annotations,
+    fitted_rect,
+    to_qrect,
+    to_tuple,
+)
+from piedf.document import COMBO, LIST, TEXT, FormField, TextBox
 from piedf.forms import FormValues
 from piedf.placements import MIN_HEIGHT, Placement, Placements, clamp_rect, default_rect
 from piedf.renderer import Renderer
@@ -36,6 +55,13 @@ CORNER_CURSORS = [
     Qt.CursorShape.SizeFDiagCursor, Qt.CursorShape.SizeBDiagCursor,
     Qt.CursorShape.SizeFDiagCursor, Qt.CursorShape.SizeBDiagCursor,
 ]
+# Font dell'editor delle caselle: gli equivalenti di Windows dei font standard PDF (stesse metriche).
+BOX_FONTS = {
+    "Helv": ("Arial", QFont.StyleHint.SansSerif),
+    "TiRo": ("Times New Roman", QFont.StyleHint.Serif),
+    "Cour": ("Courier New", QFont.StyleHint.TypeWriter),
+}
+DATE_MARGIN = 4.0  # punti oltre la larghezza del testo della data, perché non vada a capo
 
 
 @dataclass(frozen=True, eq=False)
@@ -67,6 +93,9 @@ class PdfView(QAbstractScrollArea):
     placing_changed = Signal(bool)  # entrata/uscita dalla modalità posizionamento
     link_goto = Signal(int, float)  # clic su un link interno: pagina, y in punti
     link_uri = Signal(str)  # clic su un link esterno, ancora da validare
+    text_tool_changed = Signal(bool)  # entrata/uscita dalla modalità Testo o Data
+    # Casella selezionata o in modifica (None se nessuna), anche quando cambia il suo formato.
+    text_box_changed = Signal(object)
 
     def __init__(self, renderer: Renderer, parent=None) -> None:
         super().__init__(parent)
@@ -96,6 +125,11 @@ class PdfView(QAbstractScrollArea):
 
         self._placements = Placements(self)
         self._placements.changed.connect(self.viewport().update)
+        self._placements.changed.connect(self._on_selection)
+        self._annotations = Annotations(self._placements.undo_stack, self)
+        self._connect_annotations()
+        self._shown: tuple = (None, None)  # (firma, annotazione) selezionate all'ultimo controllo
+        self._active_box: TextBox | None = None  # ultima casella attiva segnalata
         self._placing: Signature | None = None
         self._cursor_pos: QPointF | None = None  # ultima posizione del mouse nella vista
         # Trascinamento in corso: (firma, rettangolo iniziale, punto iniziale in punti, angolo o None).
@@ -110,6 +144,15 @@ class PdfView(QAbstractScrollArea):
         self._editing: FormField | None = None
         self._editor: QWidget | None = None  # editor sul posto, figlio del viewport
         self._committing = False
+
+        # Caselle di testo: modalità Testo/Data (None = spenta, "" = Testo, altrimenti il testo
+        # della data), casella nell'editor (nuova = non ancora nel modello) e trascinamento
+        # (casella, rettangolo iniziale, punto iniziale in punti, lato 0/1 o None).
+        self._text_tool: str | None = None
+        self._editing_box: TextBox | None = None
+        self._new_box = False
+        self._box_drag: tuple[TextBox, QRectF, QPointF, int | None] | None = None
+        self.text_style = dict(DEFAULT_STYLE)  # formato delle prossime caselle
 
     # --- API pubblica -----------------------------------------------------------------
 
@@ -142,6 +185,25 @@ class PdfView(QAbstractScrollArea):
         return self._editing
 
     @property
+    def editing_box(self) -> TextBox | None:
+        return self._editing_box
+
+    @property
+    def text_tool(self) -> bool:
+        return self._text_tool is not None
+
+    @property
+    def date_tool(self) -> bool:
+        return bool(self._text_tool)
+
+    @property
+    def active_text_box(self) -> TextBox | None:
+        """Casella in modifica o selezionata: quella su cui agisce la barra delle proprietà."""
+        return self._editing_box or (
+            self._annotations.selected if isinstance(self._annotations.selected, TextBox) else None
+        )
+
+    @property
     def editor(self) -> QWidget | None:
         return self._editor
 
@@ -151,8 +213,15 @@ class PdfView(QAbstractScrollArea):
 
     def set_placements(self, placements: Placements) -> None:
         self._placements.changed.disconnect(self.viewport().update)
+        self._placements.changed.disconnect(self._on_selection)
         self._placements = placements
         placements.changed.connect(self.viewport().update)
+        placements.changed.connect(self._on_selection)
+
+    def set_annotations(self, annotations: Annotations) -> None:
+        self._annotations.changed.disconnect(self._on_annotations_changed)
+        self._annotations = annotations
+        self._connect_annotations()
 
     def set_forms(self, forms: FormValues) -> None:
         self._forms.values_changed.disconnect(self._on_values_changed)
@@ -174,6 +243,7 @@ class PdfView(QAbstractScrollArea):
         if not self._sizes:
             return
         self._close_editor(commit=True)
+        self.cancel_text_tool()
         self._focus_field = None
         self._drag = None
         self._placing = signature
@@ -191,6 +261,46 @@ class PdfView(QAbstractScrollArea):
         self._update_cursor()
         self.viewport().update()
         self.placing_changed.emit(False)
+
+    def start_text_tool(self, date: str | None = None) -> None:
+        """Modalità Testo (o Data con `date`): un clic sulla pagina mette una casella."""
+        if not self._sizes:
+            return
+        self._close_editor(commit=True)
+        self.cancel_placing()
+        self._focus_field = None
+        self._text_tool = date or ""
+        self._annotations.select(None)
+        self._placements.select(None)
+        self._update_cursor()
+        self.setFocus()
+        self.text_tool_changed.emit(True)
+
+    def cancel_text_tool(self) -> None:
+        if self._text_tool is None:
+            return
+        self._text_tool = None
+        self._update_cursor()
+        self.text_tool_changed.emit(False)
+
+    def set_text_style(self, **changes) -> None:
+        """Formato (font, size, color, align) per la casella attiva e per le prossime."""
+        self.text_style.update(changes)
+        box = self.active_text_box
+        if box is None:
+            return
+        if box is self._editing_box and self._new_box:
+            for key, value in changes.items():
+                setattr(box, key, value)
+        else:
+            rect = fitted_rect(box, to_qrect(box.rect), self._sizes[box.page], **changes)
+            self._annotations.update(box, "formato casella di testo", rect=to_tuple(rect), **changes)
+        if box is self._editing_box:
+            self._style_box_editor()
+            self._place_editor()
+            self._editor.setFocus()
+        self._emit_active(force=True)
+        self.viewport().update()
 
     def page_at(self, pos: QPointF | QPoint) -> int | None:
         """Pagina sotto il punto della vista (px logici), o None sullo sfondo."""
@@ -493,6 +603,7 @@ class PdfView(QAbstractScrollArea):
                 painter.drawImage(QRectF(rect), image)
         self._paint_fields(painter)
         self._paint_placements(painter)
+        self._paint_annotations(painter)
         painter.end()
 
         self._request_visible()
@@ -525,9 +636,22 @@ class PdfView(QAbstractScrollArea):
     def keyPressEvent(self, event) -> None:
         vbar = self.verticalScrollBar()
         selected = self._placements.selected
+        box = self._annotations.selected
         focus = self._focus_field
         if event.key() == Qt.Key.Key_Escape and self._placing is not None:
             self.cancel_placing()
+        elif event.key() == Qt.Key.Key_Escape and self._text_tool is not None:
+            self.cancel_text_tool()
+        elif box is not None and self._box_drag is None and event.key() in (
+            Qt.Key.Key_Escape, Qt.Key.Key_Delete, Qt.Key.Key_Backspace, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_F2
+        ):
+            if event.key() == Qt.Key.Key_Escape:
+                self._annotations.select(None)
+            elif event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+                self._annotations.remove(box)
+                self._update_cursor()
+            else:
+                self._open_box_editor(box, new=False)
         elif event.key() == Qt.Key.Key_Space and focus is not None and focus.on_state is not None:
             self._forms.toggle(focus)
         elif event.key() == Qt.Key.Key_Escape and focus is not None:
@@ -564,8 +688,10 @@ class PdfView(QAbstractScrollArea):
 
     def _reset_interaction(self) -> None:
         self._drag = None
+        self._box_drag = None
         self._link_press = None
         self.cancel_placing()
+        self.cancel_text_tool()
         self._close_editor(commit=False)
         self._focus_field = None
 
@@ -631,17 +757,29 @@ class PdfView(QAbstractScrollArea):
         viewport = self.viewport()
         if self._placing is not None:
             viewport.setCursor(Qt.CursorShape.CrossCursor)
+        elif self._text_tool is not None:
+            viewport.setCursor(Qt.CursorShape.IBeamCursor if self._text_tool == "" else Qt.CursorShape.CrossCursor)
         elif self._drag is not None:
             corner = self._drag[3]
             viewport.setCursor(Qt.CursorShape.ClosedHandCursor if corner is None else CORNER_CURSORS[corner])
+        elif self._box_drag is not None:
+            side = self._box_drag[3]
+            viewport.setCursor(Qt.CursorShape.ClosedHandCursor if side is None else Qt.CursorShape.SizeHorCursor)
         else:
             placement, corner = self._hit(self._cursor_pos) if self._cursor_pos is not None else (None, None)
-            field = self._field_at(self._cursor_pos) if corner is None and self._cursor_pos is not None else None
+            box, side = self._hit_box(self._cursor_pos) if corner is None and self._cursor_pos is not None else (None, None)
+            field = None
+            if corner is None and box is None and self._cursor_pos is not None:
+                field = self._field_at(self._cursor_pos)
             link = None
-            if field is None and placement is None and self._cursor_pos is not None and self._links_active():
+            if field is None and placement is None and box is None and self._cursor_pos is not None and self._links_active():
                 link = self.link_at(self._cursor_pos)
             if corner is not None:
                 viewport.setCursor(CORNER_CURSORS[corner])
+            elif side is not None:
+                viewport.setCursor(Qt.CursorShape.SizeHorCursor)
+            elif box is not None:
+                viewport.setCursor(Qt.CursorShape.OpenHandCursor)
             elif field is not None:
                 text = field.type == TEXT or (field.type == COMBO and field.editable)
                 viewport.setCursor(Qt.CursorShape.IBeamCursor if text else Qt.CursorShape.PointingHandCursor)
@@ -657,7 +795,11 @@ class PdfView(QAbstractScrollArea):
 
     def _links_active(self) -> bool:
         """I link rispondono al clic solo se nessuno strumento lo usa; un campo modulo sotto il mouse vince sempre (si controlla prima)."""
-        return self._placing is None and self._drag is None and self._placements.selected is None
+        return (
+            self._placing is None and self._drag is None and self._placements.selected is None
+            and self._text_tool is None and self._box_drag is None and self._editing_box is None
+            and self._annotations.selected is None
+        )
 
     def _resized_rect(self, start: QRectF, corner: int, pt: QPointF, page_size: tuple[float, float]) -> QRectF:
         """Ridimensiona da un angolo tenendo fermo quello opposto e le proporzioni."""
@@ -698,14 +840,24 @@ class PdfView(QAbstractScrollArea):
                     self._update_cursor()
             event.accept()
             return
+        if self._text_tool is not None:
+            if event.button() == Qt.MouseButton.RightButton:
+                self.cancel_text_tool()
+            elif event.button() == Qt.MouseButton.LeftButton:
+                self._text_click(pos)
+            event.accept()
+            return
         if event.button() != Qt.MouseButton.LeftButton or not self._sizes:
             super().mousePressEvent(event)
             return
         placement, corner = self._hit(pos)
-        # Il campo ha la precedenza sulla firma, tranne sulle maniglie della firma selezionata.
-        field = self._field_at(pos) if corner is None else None
+        # Le caselle di testo sono sopra a tutto (tranne le maniglie della firma selezionata),
+        # anche sopra i campi; il campo ha la precedenza sulla firma.
+        box, side = self._hit_box(pos) if corner is None else (None, None)
+        field = self._field_at(pos) if corner is None and box is None else None
         if field is not None:
             self._placements.select(None)
+            self._annotations.select(None)
             self._activate_field(field, clicked=True)
             self._update_cursor()
             event.accept()
@@ -713,9 +865,17 @@ class PdfView(QAbstractScrollArea):
         if self._focus_field is not None:
             self._focus_field = None
             self.viewport().update()
-        # Con una firma selezionata il clic la deseleziona e basta, anche sopra un link.
+        if box is not None:
+            self._placements.select(None)
+            self._annotations.select(box)
+            self._box_drag = (box, to_qrect(box.rect), self.to_page_point(box.page, pos), side)
+            self._update_cursor()
+            event.accept()
+            return
+        # Con una firma o una casella selezionata il clic la deseleziona e basta, anche sopra un link.
         link = self.link_at(pos) if placement is None and self._links_active() else None
         self._link_press = (link, pos) if link is not None else None
+        self._annotations.select(None)
         self._placements.select(placement)
         if placement is not None:
             start = self.to_page_point(placement.page, pos)
@@ -737,6 +897,15 @@ class PdfView(QAbstractScrollArea):
             else:
                 rect = self._resized_rect(start_rect, corner, pt, size)
             self._placements.preview_rect(placement, rect)
+        elif self._box_drag is not None:
+            box, start_rect, start, side = self._box_drag
+            pt = self.to_page_point(box.page, pos)
+            size = self._sizes[box.page]
+            if side is None:
+                rect = clamp_rect(start_rect.translated(pt - start), size)
+            else:
+                rect = fitted_rect(box, self._resized_box(start_rect, side, pt, size), size)
+            self._annotations.preview_rect(box, rect)
         elif self._placing is not None:
             self.viewport().update()
         else:
@@ -752,12 +921,30 @@ class PdfView(QAbstractScrollArea):
             # Tutto il trascinamento diventa un solo passo di annulla.
             self._placements.set_rect(placement, start_rect, QRectF(placement.rect), text)
             self._update_cursor()
+        elif self._box_drag is not None and event.button() == Qt.MouseButton.LeftButton:
+            box, start_rect, _, side = self._box_drag
+            self._box_drag = None
+            text = "spostamento casella di testo" if side is None else "larghezza casella di testo"
+            self._annotations.set_rect(box, start_rect, to_qrect(box.rect), text)
+            self._update_cursor()
         elif self._link_press is not None and event.button() == Qt.MouseButton.LeftButton:
             link, start = self._link_press
             self._link_press = None
             if not _moved(start, event.position()) and self.link_at(event.position()) is link:
                 self._activate(link)
         event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        # Doppio clic su una casella: si riapre in modifica (il primo clic l'ha già selezionata).
+        pos = event.position()
+        if event.button() == Qt.MouseButton.LeftButton and self._placing is None and self._text_tool is None:
+            box, side = self._hit_box(pos)
+            if box is not None and side is None:
+                self._box_drag = None
+                self._open_box_editor(box, new=False)
+                event.accept()
+                return
+        self.mousePressEvent(event)
 
     def _activate(self, link: PageLink) -> None:
         if link.kind == "goto":
@@ -938,6 +1125,9 @@ class PdfView(QAbstractScrollArea):
         editor, field = self._editor, self._editing
         if editor is None or not self._sizes:
             return
+        if self._editing_box is not None:
+            self._place_box_editor()
+            return
         rect = self.page_rect_to_viewport(field.page, self._field_rect(field)).toAlignedRect()
         size = field.font_size or min(FIELD_FONT_PT, (field.rect[3] - field.rect[1]) * 0.7)
         if field.type in (COMBO, LIST) and not field.font_size:
@@ -978,17 +1168,27 @@ class PdfView(QAbstractScrollArea):
         if editor is None:
             return
         if commit:
-            self._commit()
-        self._editor = self._editing = None
+            self._commit_box() if self._editing_box is not None else self._commit()
+        self._editor = self._editing = self._editing_box = None
         focus = editor.window().focusWidget()
         if focus is not None and (focus is editor or editor.isAncestorOf(focus)):
             self.setFocus()
         editor.hide()
         editor.deleteLater()
+        self._emit_active()
         self.viewport().update()
 
     def eventFilter(self, obj, event) -> bool:
         # La scroll area filtra già i suoi eventi anche durante __init__: `_editor` può non esserci ancora.
+        if event.type() == QEvent.Type.KeyPress and getattr(self, "_editing_box", None) is not None:
+            # Casella di testo: Invio va a capo; Esc, Ctrl+Invio e Tab confermano.
+            key, mods = event.key(), event.modifiers()
+            ctrl_enter = key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and mods & Qt.KeyboardModifier.ControlModifier
+            if key in (Qt.Key.Key_Escape, Qt.Key.Key_Tab, Qt.Key.Key_Backtab) or ctrl_enter:
+                self._close_editor(commit=True)
+                self.setFocus()
+                return True
+            return False
         if event.type() == QEvent.Type.KeyPress and getattr(self, "_editor", None) is not None:
             key, mods = event.key(), event.modifiers()
             if key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
@@ -1009,6 +1209,191 @@ class PdfView(QAbstractScrollArea):
                 self.setFocus()
                 return True
         return super().eventFilter(obj, event)
+
+    # --- Caselle di testo ---------------------------------------------------------------
+
+    def _connect_annotations(self) -> None:
+        self._annotations.changed.connect(self._on_annotations_changed)
+
+    def _on_annotations_changed(self) -> None:
+        # Annulla/ripeti ha tolto la casella aperta nell'editor.
+        box = self._editing_box
+        if box is not None and not self._new_box and not self._committing and box not in self._annotations.items:
+            self._close_editor(commit=False)
+        self._on_selection()
+        self._emit_active(force=True)
+        self.viewport().update()
+
+    def _on_selection(self) -> None:
+        """Una sola cosa selezionata: tra firma e casella vince quella selezionata per ultima."""
+        placement, item = self._placements.selected, self._annotations.selected
+        if placement is not None and item is not None:
+            if item is self._shown[1]:
+                self._annotations.select(None)
+            else:
+                self._placements.select(None)
+            return
+        self._shown = (placement, item)
+        self._emit_active()
+
+    def _emit_active(self, force: bool = False) -> None:
+        box = self.active_text_box
+        if force or box is not self._active_box:
+            self._active_box = box
+            self.text_box_changed.emit(box)
+
+    def _side_handles(self, rect: QRectF) -> list[QRectF]:
+        """Maniglie a metà dei lati sinistro e destro: l'altezza segue il testo."""
+        y = round(rect.center().y() - HANDLE / 2)
+        return [QRectF(round(x - HANDLE / 2), y, HANDLE, HANDLE) for x in (rect.left(), rect.right())]
+
+    def _hit_box(self, pos: QPointF) -> tuple[TextBox | None, int | None]:
+        """Casella sotto il punto e, se è la selezionata, il lato della maniglia (0 sinistra, 1 destra)."""
+        visible = self._visible_range()
+        selected = self._annotations.selected
+        if isinstance(selected, TextBox) and selected.page in visible:
+            rect = self.page_rect_to_viewport(selected.page, to_qrect(selected.rect))
+            for side, handle in enumerate(self._side_handles(rect)):
+                if handle.adjusted(-2, -2, 2, 2).contains(pos):
+                    return selected, side
+        for item in reversed(self._annotations.items):
+            if (
+                isinstance(item, TextBox) and item.page in visible and item is not self._editing_box
+                and self.page_rect_to_viewport(item.page, to_qrect(item.rect)).contains(pos)
+            ):
+                return item, None
+        return None, None
+
+    def _resized_box(self, start: QRectF, side: int, pt: QPointF, page_size: tuple[float, float]) -> QRectF:
+        """Nuova larghezza dalla maniglia di un lato, tenendo fermo l'altro (l'altezza la decide il testo)."""
+        if side == 1:
+            right = max(start.left() + MIN_BOX_WIDTH, min(pt.x(), page_size[0]))
+            return QRectF(start.left(), start.top(), right - start.left(), start.height())
+        left = min(start.right() - MIN_BOX_WIDTH, max(pt.x(), 0.0))
+        return QRectF(left, start.top(), start.right() - left, start.height())
+
+    def _paint_annotations(self, painter: QPainter) -> None:
+        visible = self._visible_range()
+        dpr = self.devicePixelRatioF()
+        scale = self._scale() * dpr
+        for item in self._annotations.items:
+            if isinstance(item, TextBox) and item.page in visible and item is not self._editing_box:
+                target = self.page_rect_to_viewport(item.page, to_qrect(item.rect))
+                image = self._annotations.image(item, scale)
+                image.setDevicePixelRatio(dpr)
+                painter.drawImage(target.topLeft(), image)
+
+        if self._editing_box is not None and self._editor is not None:
+            rect, handles = QRectF(self._editor.geometry()), False
+        else:
+            box = self.active_text_box
+            if box is None or box.page not in visible:
+                return
+            rect, handles = self.page_rect_to_viewport(box.page, to_qrect(box.rect)), True
+        pen = QPen(SELECTION, 1, Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(rect)
+        if handles:
+            painter.setPen(QPen(SELECTION, 1))
+            painter.setBrush(Qt.GlobalColor.white)
+            for handle in self._side_handles(rect):
+                painter.drawRect(handle)
+
+    def _text_click(self, pos: QPointF) -> None:
+        """Clic in modalità Testo/Data: casella nuova (o, con Testo, quella già lì si riapre)."""
+        page = self.page_at(pos)
+        if page is None:
+            return
+        date = self._text_tool
+        existing, _ = self._hit_box(pos)
+        self.cancel_text_tool()
+        if existing is not None and not date:
+            self._annotations.select(existing)
+            self._open_box_editor(existing, new=False)
+            return
+        style = self.text_style
+        page_w, _ = self._sizes[page]
+        width = NEW_BOX_WIDTH
+        if date:
+            width = pymupdf.get_text_length(date, fontname=style["font"], fontsize=style["size"]) + DATE_MARGIN
+        width = min(width, page_w)
+        pt = self.to_page_point(page, pos)
+        box = TextBox(page, (0, 0, 0, 0), text=date, **style)
+        # Il clic cade a metà della prima riga.
+        rect = QRectF(pt.x(), pt.y() - box.size * 0.6, width, 0)
+        box.rect = to_tuple(fitted_rect(box, rect, self._sizes[page]))
+        self._placements.select(None)
+        if date:
+            self._annotations.add(box)  # già confermata
+        else:
+            self._annotations.select(None)
+            self._open_box_editor(box, new=True)
+        self._update_cursor()
+
+    def _open_box_editor(self, box: TextBox, new: bool) -> None:
+        self._close_editor(commit=True)
+        self._box_drag = None
+        editor = QPlainTextEdit(box.text, self.viewport())
+        editor.setFrameShape(QFrame.Shape.NoFrame)
+        editor.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        editor.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        editor.document().setDocumentMargin(0)
+        editor.moveCursor(editor.textCursor().MoveOperation.End)
+        editor.textChanged.connect(self._place_editor)  # l'altezza segue il testo
+        editor.installEventFilter(self)
+        self._editor, self._editing_box, self._new_box = editor, box, new
+        self._style_box_editor()
+        self._place_editor()
+        editor.show()
+        editor.setFocus()
+        self._emit_active()
+        self.viewport().update()
+
+    def _style_box_editor(self) -> None:
+        editor, box = self._editor, self._editing_box
+        # Sfondo trasparente: si vede la pagina sotto, come nel PDF salvato.
+        editor.setStyleSheet(f"QPlainTextEdit {{ background: transparent; color: {box.color}; }}")
+        option = editor.document().defaultTextOption()
+        option.setAlignment(ALIGNMENTS[box.align if 0 <= box.align < 3 else 0])
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        editor.document().setDefaultTextOption(option)
+
+    def _place_box_editor(self) -> None:
+        editor, box = self._editor, self._editing_box
+        family, hint = BOX_FONTS.get(box.font, BOX_FONTS["Helv"])
+        font = QFont(family)
+        font.setStyleHint(hint)
+        font.setPixelSize(max(1, round(box.size * self._scale())))
+        if editor.font() != font:
+            editor.setFont(font)
+        rect = fitted_rect(box, to_qrect(box.rect), text=editor.toPlainText())
+        view_rect = self.page_rect_to_viewport(box.page, rect)
+        # Qt può andare a capo in un punto diverso da MuPDF: l'editor non taglia mai una riga.
+        lines = editor.document().documentLayout().documentSize().height()
+        view_rect.setHeight(max(view_rect.height(), lines * editor.fontMetrics().lineSpacing()))
+        editor.setGeometry(view_rect.toAlignedRect())
+        self.viewport().update()
+
+    def _commit_box(self) -> None:
+        """Conferma il testo: una casella vuota sparisce (o non nasce)."""
+        box, text = self._editing_box, self._editor.toPlainText()
+        empty = not text.strip()
+        self._committing = True
+        try:
+            if self._new_box:
+                if not empty:
+                    box.text = text
+                    box.rect = to_tuple(fitted_rect(box, to_qrect(box.rect), self._sizes[box.page]))
+                    self._annotations.add(box)
+            elif empty:
+                self._annotations.remove(box)
+            elif text != box.text:
+                rect = fitted_rect(box, to_qrect(box.rect), self._sizes[box.page], text=text)
+                self._annotations.update(box, "modifica testo", text=text, rect=to_tuple(rect))
+        finally:
+            self._committing = False
 
 
 def _moved(start: QPointF, pos: QPointF) -> bool:
