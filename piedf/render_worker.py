@@ -113,7 +113,7 @@ def _lower_priority() -> None:
             kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x4000)  # BELOW_NORMAL_PRIORITY_CLASS
         else:
             os.nice(5)
-    except (OSError, AttributeError):
+    except (ImportError, OSError, AttributeError):
         pass
 
 
