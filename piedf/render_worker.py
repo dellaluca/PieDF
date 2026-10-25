@@ -22,8 +22,14 @@ si vede (dopo /Rotate), come `page.rect`. `kind` è "goto" (interno: `page` e `t
 None per le coordinate che la destinazione non indica) oppure "uri" (esterno: `uri`
 così com'è, anche file:, launch e link ad altri PDF; decide la GUI cosa seguire).
 
-La stampa (#25) usa un secondo processo, `print_pages`, che non tocca quello delle pagine visibili.
-Le miniature di "Organizza pagine" (#26) un altro ancora, `thumbnails`, che apre anche i file inseriti.
+Le annotazioni di PieDF (caselle di testo) le disegna la vista dal suo modello: qui si
+cancellano dal documento in memoria prima del primo render di ogni pagina, così non
+compaiono due volte. Il file non si tocca.
+
+La stampa (#25) usa un secondo processo, `print_pages`, che non tocca quello delle pagine
+visibili e stampa il file così com'è, annotazioni di PieDF comprese.
+Le miniature di "Organizza pagine" (#26) un altro ancora, `thumbnails`, che apre anche i
+file inseriti e li disegna così come sono, annotazioni di PieDF comprese.
 """
 
 import math
@@ -38,6 +44,7 @@ def run(requests, results) -> None:
     doc = None
     gen = 0
     wanted: list[tuple[int, float]] = []
+    cleaned: set[int] = set()  # pagine già senza le annotazioni di PieDF
 
     while True:
         # Senza lavoro si aspetta; altrimenti si leggono solo i messaggi già arrivati,
@@ -50,6 +57,7 @@ def run(requests, results) -> None:
             if kind == "open":
                 _, gen, path, password = msg
                 wanted = []
+                cleaned = set()
                 if doc is not None:
                     doc.close()
                 doc = None
@@ -88,6 +96,9 @@ def run(requests, results) -> None:
 
         page, scale = wanted.pop(0)
         try:
+            if page not in cleaned:
+                _remove_piedf_annots(doc[page])
+                cleaned.add(page)
             pix = doc[page].get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
             results.put(("page", gen, page, scale, pix.width, pix.height, pix.stride, pix.samples))
         except Exception as e:
@@ -128,6 +139,16 @@ def print_pages(path, password, items, acks, results) -> None:
         results.put(("page", n, pix.width, pix.height, pix.stride, pix.samples))
         del pix
     doc.close()
+
+
+def _remove_piedf_annots(page) -> None:
+    from piedf.document import piedf_annots
+
+    try:
+        for annot in piedf_annots(page):
+            page.delete_annot(annot)
+    except Exception:
+        pass  # meglio un doppione che una pagina bianca
 
 
 def thumbnails(requests, results) -> None:
