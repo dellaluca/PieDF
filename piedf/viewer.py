@@ -4,7 +4,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
 
-import pymupdf
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QTextOption, QWheelEvent
 from PySide6.QtWidgets import (
@@ -61,7 +60,6 @@ BOX_FONTS = {
     "TiRo": ("Times New Roman", QFont.StyleHint.Serif),
     "Cour": ("Courier New", QFont.StyleHint.TypeWriter),
 }
-DATE_MARGIN = 4.0  # punti oltre la larghezza del testo della data, perché non vada a capo
 
 
 @dataclass(frozen=True, eq=False)
@@ -249,6 +247,7 @@ class PdfView(QAbstractScrollArea):
         self._placing = signature
         self._placements.image(signature.path)  # in cache subito, anche se il PNG sparisce
         self._placements.select(None)
+        self._annotations.select(None)
         self.viewport().setCursor(Qt.CursorShape.CrossCursor)
         self.setFocus()
         self.viewport().update()
@@ -905,6 +904,8 @@ class PdfView(QAbstractScrollArea):
                 rect = clamp_rect(start_rect.translated(pt - start), size)
             else:
                 rect = fitted_rect(box, self._resized_box(start_rect, side, pt, size), size)
+                if side == 0:  # non più stretta della parola più lunga: si allarga verso sinistra
+                    rect.moveRight(start_rect.right())
             self._annotations.preview_rect(box, rect)
         elif self._placing is not None:
             self.viewport().update()
@@ -1315,10 +1316,8 @@ class PdfView(QAbstractScrollArea):
             return
         style = self.text_style
         page_w, _ = self._sizes[page]
-        width = NEW_BOX_WIDTH
-        if date:
-            width = pymupdf.get_text_length(date, fontname=style["font"], fontsize=style["size"]) + DATE_MARGIN
-        width = min(width, page_w)
+        # La data è larga quanto il suo testo (fitted_rect la allarga fino alla parola più lunga).
+        width = min(MIN_BOX_WIDTH if date else NEW_BOX_WIDTH, page_w)
         pt = self.to_page_point(page, pos)
         box = TextBox(page, (0, 0, 0, 0), text=date, **style)
         # Il clic cade a metà della prima riga.

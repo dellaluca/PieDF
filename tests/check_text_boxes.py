@@ -286,6 +286,11 @@ def main():
     check("5. casella già confermata con la data di oggi", box is not None and box.text == today and v.editor is None
           and not v.text_tool and model.selected is box, str(box))
     check("5. la data non va a capo", box is not None and abs((box.rect[3] - box.rect[1]) - box.size * 1.2) < 0.01)
+    w.size_box.setValue(30)
+    check("5. ingrandita: la casella si allarga, la data resta su una riga (MuPDF non spezza le parole)",
+          box is not None and box.size == 30 and abs((box.rect[3] - box.rect[1]) - 36) < 0.01
+          and box.rect[2] - box.rect[0] > 120, str(box and box.rect))
+    w.size_box.setValue(11)
     save_as(work / "data_salvata.pdf")
     check("5. il file contiene la data gg/mm/aaaa", today in page_text(work / "data_salvata.pdf"), today)
 

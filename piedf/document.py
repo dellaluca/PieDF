@@ -362,6 +362,12 @@ def text_box_lines(text: str, font: str, size: float, width: float) -> int:
         doc.close()
 
 
+def longest_word(text: str, font: str, size: float) -> float:
+    """Larghezza in punti della parola più lunga (+1 di margine): sotto, MuPDF la taglierebbe."""
+    words = text.split()
+    return max((pymupdf.get_text_length(w, fontname=font, fontsize=size) for w in words), default=0.0) + 1.0
+
+
 def text_box_height(text: str, font: str, size: float, width: float) -> float:
     """Altezza in punti che contiene tutto il testo: l'altezza della casella segue il testo."""
     return text_box_lines(text, font, size, width) * LINE_HEIGHT * size

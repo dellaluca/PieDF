@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QDate, QEvent, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QIcon, QKeySequence, QPixmap
 from PySide6.QtPrintSupport import QAbstractPrintDialog, QPrintDialog, QPrinter, QPrinterInfo
 from PySide6.QtWidgets import (
@@ -295,13 +295,16 @@ class MainWindow(QMainWindow):
         self._doc_widgets = [self._page_box, self._zoom_box, self.sign_button]
 
     def _build_text_bar(self) -> None:
-        """Proprietà della casella di testo: visibile solo con una casella selezionata o in modifica."""
-        bar = QToolBar("Testo")
-        bar.setMovable(False)
-        bar.setFloatable(False)
-        bar.toggleViewAction().setVisible(False)
+        """Proprietà della casella di testo: visibile solo con una casella selezionata o in modifica.
+
+        Sta sopra la vista, in alto a destra: comparendo non sposta le pagine (né la casella
+        che si sta trascinando).
+        """
+        bar = QToolBar("Testo", self.view)
+        bar.setObjectName("text_bar")
+        bar.setStyleSheet("#text_bar { background: palette(window); border: 1px solid palette(mid); border-radius: 3px; }")
         self.text_bar = bar
-        self.addToolBar(bar)
+        self.view.installEventFilter(self)
         # Senza focus: l'editor della casella resta attivo mentre si cambia il formato.
         self.font_box = QComboBox()
         self.font_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -370,6 +373,19 @@ class MainWindow(QMainWindow):
             widget.blockSignals(False)
         self.align_actions[box.align if 0 <= box.align < 3 else 0].setChecked(True)
         self.text_bar.show()
+        self.text_bar.raise_()
+        self._place_text_bar()
+
+    def _place_text_bar(self) -> None:
+        bar, viewport = self.text_bar, self.view.viewport()
+        bar.adjustSize()
+        x = viewport.x() + max(0, viewport.width() - bar.width() - 8)
+        bar.move(x, viewport.y() + 8)
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.view and event.type() == QEvent.Type.Resize and self.text_bar.isVisible():
+            self._place_text_bar()
+        return super().eventFilter(obj, event)
 
     def _build_form_bar(self) -> None:
         """Barra sottile sopra la vista, solo per i documenti con campi compilabili."""

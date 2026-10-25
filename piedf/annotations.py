@@ -14,13 +14,12 @@ import pymupdf
 from PySide6.QtCore import QObject, QRectF, Signal
 from PySide6.QtGui import QImage, QUndoCommand, QUndoStack
 
-from piedf.document import FONTS, Annotation, TextBox, add_text_box, text_box_height
+from piedf.document import FONTS, Annotation, TextBox, add_text_box, longest_word, text_box_height
 
 FONT_LABELS = {"Helv": "Helvetica", "TiRo": "Times", "Cour": "Courier"}
 COLORS = {"#000000": "Nero", "#1a3fbf": "Blu", "#c00000": "Rosso"}
 MIN_SIZE, MAX_SIZE = 8, 36
 DEFAULT_STYLE = {"font": FONTS[0], "size": 11.0, "color": "#000000", "align": 0}
-STYLE_KEYS = tuple(DEFAULT_STYLE)
 NEW_BOX_WIDTH = 180.0  # punti
 MIN_BOX_WIDTH = 20.0  # punti
 IMAGE_CACHE = 200  # immagini delle caselle tenute in memoria
@@ -36,11 +35,17 @@ def to_tuple(rect: QRectF) -> tuple[float, float, float, float]:
 
 
 def fitted_rect(box: TextBox, rect: QRectF, page_size: tuple[float, float] | None = None, **changes) -> QRectF:
-    """Il rettangolo con l'altezza che segue il testo (con le modifiche `changes`), dentro la pagina."""
+    """Il rettangolo con l'altezza che segue il testo (con le modifiche `changes`), dentro la pagina.
+
+    MuPDF non spezza le parole: la casella non è mai più stretta della parola più lunga.
+    """
     text = changes.get("text", box.text)
     font, size = changes.get("font", box.font), changes.get("size", box.size)
-    height = text_box_height(text or " ", font, size, rect.width())
-    rect = QRectF(rect.x(), rect.y(), rect.width(), height)
+    width = max(rect.width(), MIN_BOX_WIDTH, longest_word(text, font, size))
+    if page_size is not None:
+        width = min(width, page_size[0])
+    height = text_box_height(text or " ", font, size, width)
+    rect = QRectF(rect.x(), rect.y(), width, height)
     if page_size is not None:
         page_w, page_h = page_size
         rect.moveLeft(max(0.0, min(rect.x(), page_w - rect.width())))
