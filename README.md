@@ -59,6 +59,7 @@ python tests/check_signatures.py
 | Ctrl+PgSu / Ctrl+PgGiù | Pagina precedente / successiva |
 | Ctrl+G | Vai a pagina |
 | Home / Fine | Inizio / fine documento |
+| Spazio + trascina / tasto centrale | Sposta il documento |
 
 Lo sviluppo procede a ticket: vedi le [issue](https://github.com/dellaluca/PieDF/issues).
 

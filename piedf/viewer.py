@@ -138,6 +138,9 @@ class PdfView(QAbstractScrollArea):
         # Trascinamento in corso: (firma, rettangolo iniziale, punto iniziale in punti, angolo o None).
         self._drag: tuple[Placement, QRectF, QPointF, int | None] | None = None
         self._link_press: tuple[PageLink, QPointF] | None = None  # pressione su un link, non ancora clic
+        # Manina: Spazio tenuto premuto e trascinamento in corso (tasto, punto iniziale, barre iniziali).
+        self._space_held = False
+        self._pan: tuple[Qt.MouseButton, QPointF, int, int] | None = None
         self.viewport().setMouseTracking(True)
 
         self._forms = FormValues(self._placements.undo_stack, self)
@@ -182,6 +185,11 @@ class PdfView(QAbstractScrollArea):
     @property
     def placing(self) -> bool:
         return self._placing is not None
+
+    @property
+    def panning(self) -> bool:
+        """Manina attiva: Spazio tenuto premuto o trascinamento in corso."""
+        return self._space_held or self._pan is not None
 
     @property
     def editing_field(self) -> FormField | None:
@@ -689,6 +697,13 @@ class PdfView(QAbstractScrollArea):
                 self._open_box_editor(box, new=False)
         elif event.key() == Qt.Key.Key_Space and focus is not None and focus.on_state is not None:
             self._forms.toggle(focus)
+        elif event.key() == Qt.Key.Key_Space and self._sizes:
+            # Windows ripete la pressione finché si tiene il tasto: conta solo la prima.
+            if not event.isAutoRepeat() and not self._space_held:
+                self._space_held = True
+                self._link_press = None
+                self._update_cursor()
+                self.viewport().update()  # l'anteprima della firma in posizionamento sparisce
         elif event.key() == Qt.Key.Key_Escape and focus is not None:
             self._focus_field = None
             self.viewport().update()
@@ -703,6 +718,32 @@ class PdfView(QAbstractScrollArea):
             vbar.setValue(vbar.maximum())
         else:
             super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat() and self._space_held:
+            # Il trascinamento già iniziato continua fino al rilascio del mouse.
+            self._space_held = False
+            self._update_cursor()
+            self.viewport().update()
+            return
+        super().keyReleaseEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        # Alt+Tab con lo Spazio premuto: il rilascio arriva a un'altra finestra.
+        self._cancel_pan()
+        super().focusOutEvent(event)
+
+    def event(self, event) -> bool:
+        if event.type() == QEvent.Type.WindowDeactivate:
+            self._cancel_pan()
+        return super().event(event)
+
+    def _cancel_pan(self) -> None:
+        if self._space_held or self._pan is not None:
+            self._space_held = False
+            self._pan = None
+            self._update_cursor()
+            self.viewport().update()
 
     def _update_current_page(self, force: int | None = None) -> None:
         if not self._sizes:
@@ -725,6 +766,8 @@ class PdfView(QAbstractScrollArea):
         self._drag = None
         self._box_drag = None
         self._link_press = None
+        self._space_held = False
+        self._pan = None
         self.cancel_placing()
         self.cancel_text_tool()
         self._close_editor(commit=False)
@@ -732,7 +775,7 @@ class PdfView(QAbstractScrollArea):
 
     def _placing_rect(self) -> tuple[int, QRectF] | None:
         """Pagina e rettangolo (punti) dove finirebbe la firma in posizionamento."""
-        if self._placing is None or self._cursor_pos is None:
+        if self._placing is None or self._cursor_pos is None or self.panning:
             return None
         page = self.page_at(self._cursor_pos)
         if page is None:
@@ -790,7 +833,12 @@ class PdfView(QAbstractScrollArea):
 
     def _update_cursor(self) -> None:
         viewport = self.viewport()
-        if self._placing is not None:
+        if self._pan is not None or (self._space_held and self._drag is None and self._box_drag is None):
+            # La manina vince su tutto: lo strumento di prima riprende rilasciando lo Spazio.
+            viewport.setCursor(Qt.CursorShape.ClosedHandCursor if self._pan is not None else Qt.CursorShape.OpenHandCursor)
+            if viewport.toolTip():
+                viewport.setToolTip("")
+        elif self._placing is not None:
             viewport.setCursor(Qt.CursorShape.CrossCursor)
         elif self._text_tool is not None:
             viewport.setCursor(Qt.CursorShape.IBeamCursor if self._text_tool == "" else Qt.CursorShape.CrossCursor)
@@ -831,7 +879,8 @@ class PdfView(QAbstractScrollArea):
     def _links_active(self) -> bool:
         """I link rispondono al clic solo se nessuno strumento lo usa; un campo modulo sotto il mouse vince sempre (si controlla prima)."""
         return (
-            self._placing is None and self._drag is None and self._placements.selected is None
+            not self._space_held and self._pan is None
+            and self._placing is None and self._drag is None and self._placements.selected is None
             and self._text_tool is None and self._box_drag is None and self._editing_box is None
             and self._annotations.selected is None
         )
@@ -862,6 +911,16 @@ class PdfView(QAbstractScrollArea):
         self._cursor_pos = pos
         # Un clic fuori dall'editor conferma quello che si è scritto (l'editor riceve i suoi clic).
         self._close_editor(commit=True)
+        # Manina: Spazio + tasto sinistro o tasto centrale. Il clic non fa altro.
+        if self._pan is not None or self._space_held or event.button() == Qt.MouseButton.MiddleButton:
+            buttons = (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton)
+            if self._pan is None and self._drag is None and self._box_drag is None and event.button() in buttons:
+                hbar, vbar = self.horizontalScrollBar(), self.verticalScrollBar()
+                self._pan = (event.button(), pos, hbar.value(), vbar.value())
+                self._link_press = None
+                self._update_cursor()
+            event.accept()
+            return
         if self._placing is not None:
             if event.button() == Qt.MouseButton.RightButton:
                 self.cancel_placing()
@@ -923,7 +982,13 @@ class PdfView(QAbstractScrollArea):
         self._cursor_pos = pos
         if self._link_press is not None and _moved(self._link_press[1], pos):
             self._link_press = None  # trascinamento: niente clic sul link
-        if self._drag is not None:
+        if self._pan is not None:
+            # Il documento segue il mouse 1:1; le barre restano da sole nei loro limiti.
+            _, start, x, y = self._pan
+            delta = pos - start
+            self.horizontalScrollBar().setValue(round(x - delta.x()))
+            self.verticalScrollBar().setValue(round(y - delta.y()))
+        elif self._drag is not None:
             placement, start_rect, start, corner = self._drag
             pt = self.to_page_point(placement.page, pos)
             size = self._sizes[placement.page]
@@ -951,7 +1016,11 @@ class PdfView(QAbstractScrollArea):
 
     def mouseReleaseEvent(self, event) -> None:
         self._cursor_pos = event.position()
-        if self._drag is not None and event.button() == Qt.MouseButton.LeftButton:
+        if self._pan is not None:
+            if event.button() == self._pan[0]:
+                self._pan = None
+                self._update_cursor()
+        elif self._drag is not None and event.button() == Qt.MouseButton.LeftButton:
             placement, start_rect, _, corner = self._drag
             self._drag = None
             text = "spostamento firma" if corner is None else "ridimensionamento firma"
@@ -974,7 +1043,10 @@ class PdfView(QAbstractScrollArea):
     def mouseDoubleClickEvent(self, event) -> None:
         # Doppio clic su una casella: si riapre in modifica (il primo clic l'ha già selezionata).
         pos = event.position()
-        if event.button() == Qt.MouseButton.LeftButton and self._placing is None and self._text_tool is None:
+        if (
+            event.button() == Qt.MouseButton.LeftButton and self._placing is None and self._text_tool is None
+            and not self.panning
+        ):
             box, side = self._hit_box(pos)
             if box is not None and side is None:
                 self._box_drag = None
@@ -991,7 +1063,7 @@ class PdfView(QAbstractScrollArea):
 
     def viewportEvent(self, event) -> bool:
         # Il mouse esce dalla vista: l'anteprima del posizionamento sparisce.
-        if event.type() == QEvent.Type.Leave and self._drag is None:
+        if event.type() == QEvent.Type.Leave and self._drag is None and self._pan is None:
             self._cursor_pos = None
             if self._placing is not None:
                 self.viewport().update()
