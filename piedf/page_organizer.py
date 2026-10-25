@@ -10,6 +10,7 @@ visibili.
 import multiprocessing
 import os
 import queue
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QAbstractListModel, QMimeData, QModelIndex, QObject, QPoint, QRect, QSize, Qt, QTimer, Signal
@@ -41,6 +42,7 @@ CELL = QSize(THUMB + 30, THUMB + 36)
 MIME = "application/x-piedf-pages"
 POLL_MS = 30
 AHEAD = 12  # miniature da preparare oltre quelle visibili
+QUIT_TIMEOUT = 3.0  # secondi concessi al processo delle miniature per uscire da solo
 INSERTED = QColor("#f9a825")  # cornice delle pagine aggiunte nella finestra
 PAGE_BORDER = QColor("#9e9e9e")
 PDF_FILTER = "Documenti PDF (*.pdf)"
@@ -685,8 +687,26 @@ class PageOrganizer(QDialog):
             self._job.cancel()
         self._poll_timer.stop()
         self._thumb_timer.stop()
-        self._thumb_requests.put(("quit",))
-        self._thumb_process.join(1)
-        if self._thumb_process.is_alive():
-            self._thumb_process.terminate()
+        self._stop_thumbs()
         super().done(result)
+
+    def _stop_thumbs(self) -> None:
+        """Chiude il processo delle miniature: messaggio di uscita, attesa, `terminate()` solo come ultima risorsa."""
+        process = self._thumb_process
+        self._thumb_requests.put(("quit",))
+        deadline = time.monotonic() + QUIT_TIMEOUT
+        while process.is_alive() and time.monotonic() < deadline:
+            # Si svuotano i risultati: un processo che esce aspetta che le miniature
+            # già spedite lascino la pipe (su Windows il buffer è piccolo) e non uscirebbe.
+            try:
+                while True:
+                    self._thumb_results.get_nowait()
+            except (queue.Empty, OSError, ValueError):
+                pass
+            process.join(0.05)
+        if process.is_alive():
+            process.terminate()
+            process.join(2)
+        for q in (self._thumb_requests, self._thumb_results):
+            q.close()
+            q.cancel_join_thread()

@@ -398,7 +398,24 @@ def main():
     check("Ctrl+[ / Ctrl+]", dlg.act_rotate_left.shortcut().toString() == "Ctrl+["
           and dlg.act_rotate_right.shortcut().toString() == "Ctrl+]")
     dlg.reject()
-    check("10. processo delle miniature chiuso", not dlg._thumb_process.is_alive())
+    process = dlg._thumb_process
+    deadline = time.monotonic() + 5
+    while process.is_alive() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.05)
+    # exitcode 0: uscito da solo col messaggio di uscita, non con terminate() (-15)
+    check("10. processo delle miniature chiuso", not process.is_alive() and process.exitcode == 0,
+          f"vivo={process.is_alive()} exitcode={process.exitcode}")
+
+    # Chiusura mentre le miniature sono in corso e nessuno le legge più
+    dlg = PageOrganizer(str(PDFS / "lungo_350.pdf"), None, [(595, 842)] * 350, str(PDFS / "lungo_350.pdf"), w)
+    dlg._poll_timer.stop()  # le miniature restano nella pipe
+    dlg.resize(1200, 900); dlg.show()
+    pump(2.0)
+    dlg.reject()
+    process = dlg._thumb_process
+    check("10. processo chiuso anche con miniature non lette", not process.is_alive() and process.exitcode == 0,
+          f"vivo={process.is_alive()} exitcode={process.exitcode}")
 
     positions = json.loads((data / "posizioni.json").read_text("utf-8")) if (data / "posizioni.json").exists() else {}
     check("nessuna posizione per i temporanei", not any("piedf-pagine" in k for k in positions), str(list(positions)))

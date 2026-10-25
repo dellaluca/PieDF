@@ -148,6 +148,9 @@ def thumbnails(requests, results) -> None:
             if msg[0] == "quit":
                 for doc in docs.values():
                     doc.close()
+                # Le miniature non ancora lette non servono più: senza questo il processo
+                # aspetterebbe all'uscita che la GUI le legga.
+                results.cancel_join_thread()
                 return
             if msg[0] == "source":
                 sources[msg[1]] = (msg[2], msg[3])
