@@ -5,7 +5,19 @@ from dataclasses import dataclass
 from enum import Enum
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QTextOption, QWheelEvent
+from PySide6.QtGui import (
+    QColor,
+    QCursor,
+    QFont,
+    QImage,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QPolygonF,
+    QTextOption,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
@@ -18,16 +30,24 @@ from PySide6.QtWidgets import (
 )
 
 from piedf.annotations import (
+    DEFAULT_DRAW,
     DEFAULT_STYLE,
+    ERASER,
+    HIGHLIGHTER,
+    HIGHLIGHTER_OPACITY,
+    HIGHLIGHTER_WIDTH,
     MIN_BOX_WIDTH,
     NEW_BOX_WIDTH,
+    PEN,
     Annotations,
     fitted_rect,
+    moved_ink,
     to_qrect,
     to_tuple,
 )
-from piedf.document import COMBO, LIST, TEXT, FormField, TextBox
+from piedf.document import COMBO, LIST, TEXT, FormField, Ink, TextBox, ink_rect
 from piedf.forms import FormValues
+from piedf.ink import simplify, smooth_points
 from piedf.placements import MIN_HEIGHT, Placement, Placements, clamp_rect, default_rect
 from piedf.renderer import Renderer
 from piedf.signatures import Signature
@@ -62,6 +82,9 @@ BOX_FONTS = {
     "TiRo": ("Times New Roman", QFont.StyleHint.Serif),
     "Cour": ("Courier New", QFont.StyleHint.TypeWriter),
 }
+INK_HIT_PX = 4  # px logici: un clic così vicino a un tratto lo prende (selezione e gomma)
+STROKE_MIN_PX = 2.0  # px logici tra due punti del tratto in corso
+_CURSORS: dict[str, QCursor] = {}
 
 
 @dataclass(frozen=True, eq=False)
@@ -96,6 +119,7 @@ class PdfView(QAbstractScrollArea):
     text_tool_changed = Signal(bool)  # entrata/uscita dalla modalità Testo o Data
     # Casella selezionata o in modifica (None se nessuna), anche quando cambia il suo formato.
     text_box_changed = Signal(object)
+    draw_tool_changed = Signal(object)  # strumento di disegno attivo (PEN, HIGHLIGHTER, ERASER) o None
 
     def __init__(self, renderer: Renderer, parent=None) -> None:
         super().__init__(parent)
@@ -160,6 +184,16 @@ class PdfView(QAbstractScrollArea):
         self._box_drag: tuple[TextBox, QRectF, QPointF, int | None] | None = None
         self.text_style = dict(DEFAULT_STYLE)  # formato delle prossime caselle
 
+        # Disegno (#22): strumento attivo (None = spento), tratto in corso (pagina, punti grezzi
+        # in punti PDF, curva levigata in punti PDF), ultimo punto della gomma durante il
+        # trascinamento e spostamento di un tratto selezionato (tratto, valori iniziali, punto iniziale).
+        self._draw_tool: str | None = None
+        self._stroke: tuple[int, list[tuple[float, float]], QPainterPath] | None = None
+        self._erasing: QPointF | None = None
+        self._ink_drag: tuple[Ink, dict, QPointF] | None = None
+        self._polygons: dict[int, tuple[tuple, list[QPolygonF]]] = {}  # id(tratto) → (punti, poligoni)
+        self.draw_style = dict(DEFAULT_DRAW)  # colori e spessore dei prossimi tratti
+
     # --- API pubblica -----------------------------------------------------------------
 
     @property
@@ -206,6 +240,15 @@ class PdfView(QAbstractScrollArea):
     @property
     def date_tool(self) -> bool:
         return bool(self._text_tool)
+
+    @property
+    def draw_tool(self) -> str | None:
+        return self._draw_tool
+
+    @property
+    def drawing(self) -> bool:
+        """Tratto in corso (tasto premuto con penna o evidenziatore)."""
+        return self._stroke is not None
 
     @property
     def active_text_box(self) -> TextBox | None:
@@ -275,6 +318,7 @@ class PdfView(QAbstractScrollArea):
             return
         self._close_editor(commit=True)
         self.cancel_text_tool()
+        self.cancel_draw_tool()
         self._focus_field = None
         self._drag = None
         self._placing = signature
@@ -300,6 +344,7 @@ class PdfView(QAbstractScrollArea):
             return
         self._close_editor(commit=True)
         self.cancel_placing()
+        self.cancel_draw_tool()
         self._focus_field = None
         self._text_tool = date or ""
         self._annotations.select(None)
@@ -314,6 +359,35 @@ class PdfView(QAbstractScrollArea):
         self._text_tool = None
         self._update_cursor()
         self.text_tool_changed.emit(False)
+
+    def start_draw_tool(self, tool: str) -> None:
+        """Penna, evidenziatore o gomma: resta attivo per più tratti, finché Esc o `cancel_draw_tool`."""
+        if not self._sizes:
+            return
+        self._close_editor(commit=True)
+        self.cancel_placing()
+        self.cancel_text_tool()
+        self._finish_stroke()
+        self._focus_field = None
+        self._ink_drag = None
+        self._erasing = None
+        self._draw_tool = tool
+        self._annotations.select(None)
+        self._placements.select(None)
+        self._update_cursor()
+        self.setFocus()
+        self.viewport().update()
+        self.draw_tool_changed.emit(tool)
+
+    def cancel_draw_tool(self) -> None:
+        if self._draw_tool is None:
+            return
+        self._draw_tool = None
+        self._stroke = None  # un tratto a metà (Esc col tasto premuto) non si tiene
+        self._erasing = None
+        self._update_cursor()
+        self.viewport().update()
+        self.draw_tool_changed.emit(None)
 
     def set_text_style(self, **changes) -> None:
         """Formato (font, size, color, align) per la casella attiva e per le prossime."""
@@ -685,7 +759,9 @@ class PdfView(QAbstractScrollArea):
             self.cancel_placing()
         elif event.key() == Qt.Key.Key_Escape and self._text_tool is not None:
             self.cancel_text_tool()
-        elif box is not None and self._box_drag is None and event.key() in (
+        elif event.key() == Qt.Key.Key_Escape and self._draw_tool is not None:
+            self.cancel_draw_tool()
+        elif box is not None and self._box_drag is None and self._ink_drag is None and event.key() in (
             Qt.Key.Key_Escape, Qt.Key.Key_Delete, Qt.Key.Key_Backspace, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_F2
         ):
             if event.key() == Qt.Key.Key_Escape:
@@ -693,7 +769,7 @@ class PdfView(QAbstractScrollArea):
             elif event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
                 self._annotations.remove(box)
                 self._update_cursor()
-            else:
+            elif isinstance(box, TextBox):  # un tratto non ha testo da modificare
                 self._open_box_editor(box, new=False)
         elif event.key() == Qt.Key.Key_Space and focus is not None and focus.on_state is not None:
             self._forms.toggle(focus)
@@ -765,11 +841,16 @@ class PdfView(QAbstractScrollArea):
     def _reset_interaction(self) -> None:
         self._drag = None
         self._box_drag = None
+        self._ink_drag = None
+        self._stroke = None
+        self._erasing = None
+        self._polygons.clear()
         self._link_press = None
         self._space_held = False
         self._pan = None
         self.cancel_placing()
         self.cancel_text_tool()
+        self.cancel_draw_tool()
         self._close_editor(commit=False)
         self._focus_field = None
 
@@ -833,7 +914,8 @@ class PdfView(QAbstractScrollArea):
 
     def _update_cursor(self) -> None:
         viewport = self.viewport()
-        if self._pan is not None or (self._space_held and self._drag is None and self._box_drag is None):
+        busy = self._drag is not None or self._box_drag is not None or self._ink_drag is not None or self._stroke is not None
+        if self._pan is not None or (self._space_held and not busy):
             # La manina vince su tutto: lo strumento di prima riprende rilasciando lo Spazio.
             viewport.setCursor(Qt.CursorShape.ClosedHandCursor if self._pan is not None else Qt.CursorShape.OpenHandCursor)
             if viewport.toolTip():
@@ -842,6 +924,12 @@ class PdfView(QAbstractScrollArea):
             viewport.setCursor(Qt.CursorShape.CrossCursor)
         elif self._text_tool is not None:
             viewport.setCursor(Qt.CursorShape.IBeamCursor if self._text_tool == "" else Qt.CursorShape.CrossCursor)
+        elif self._draw_tool is not None:
+            viewport.setCursor(_tool_cursor(self._draw_tool))
+            if viewport.toolTip():
+                viewport.setToolTip("")
+        elif self._ink_drag is not None:
+            viewport.setCursor(Qt.CursorShape.ClosedHandCursor)
         elif self._drag is not None:
             corner = self._drag[3]
             viewport.setCursor(Qt.CursorShape.ClosedHandCursor if corner is None else CORNER_CURSORS[corner])
@@ -851,17 +939,23 @@ class PdfView(QAbstractScrollArea):
         else:
             placement, corner = self._hit(self._cursor_pos) if self._cursor_pos is not None else (None, None)
             box, side = self._hit_box(self._cursor_pos) if corner is None and self._cursor_pos is not None else (None, None)
-            field = None
+            ink = None
             if corner is None and box is None and self._cursor_pos is not None:
+                ink = self._ink_at(self._cursor_pos)
+            field = None
+            if corner is None and box is None and ink is None and self._cursor_pos is not None:
                 field = self._field_at(self._cursor_pos)
             link = None
-            if field is None and placement is None and box is None and self._cursor_pos is not None and self._links_active():
+            if (
+                field is None and placement is None and box is None and ink is None and self._cursor_pos is not None
+                and self._links_active()
+            ):
                 link = self.link_at(self._cursor_pos)
             if corner is not None:
                 viewport.setCursor(CORNER_CURSORS[corner])
             elif side is not None:
                 viewport.setCursor(Qt.CursorShape.SizeHorCursor)
-            elif box is not None:
+            elif box is not None or ink is not None:
                 viewport.setCursor(Qt.CursorShape.OpenHandCursor)
             elif field is not None:
                 text = field.type == TEXT or (field.type == COMBO and field.editable)
@@ -882,7 +976,7 @@ class PdfView(QAbstractScrollArea):
             not self._space_held and self._pan is None
             and self._placing is None and self._drag is None and self._placements.selected is None
             and self._text_tool is None and self._box_drag is None and self._editing_box is None
-            and self._annotations.selected is None
+            and self._annotations.selected is None and self._draw_tool is None and self._ink_drag is None
         )
 
     def _resized_rect(self, start: QRectF, corner: int, pt: QPointF, page_size: tuple[float, float]) -> QRectF:
@@ -914,7 +1008,8 @@ class PdfView(QAbstractScrollArea):
         # Manina: Spazio + tasto sinistro o tasto centrale. Il clic non fa altro.
         if self._pan is not None or self._space_held or event.button() == Qt.MouseButton.MiddleButton:
             buttons = (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton)
-            if self._pan is None and self._drag is None and self._box_drag is None and event.button() in buttons:
+            idle = self._drag is None and self._box_drag is None and self._ink_drag is None and self._stroke is None
+            if self._pan is None and idle and event.button() in buttons:
                 hbar, vbar = self.horizontalScrollBar(), self.verticalScrollBar()
                 self._pan = (event.button(), pos, hbar.value(), vbar.value())
                 self._link_press = None
@@ -941,6 +1036,12 @@ class PdfView(QAbstractScrollArea):
                 self._text_click(pos)
             event.accept()
             return
+        if self._draw_tool is not None:
+            # Con uno strumento di disegno il clic disegna (o cancella) e basta: niente campi né link.
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._draw_press(pos)
+            event.accept()
+            return
         if event.button() != Qt.MouseButton.LeftButton or not self._sizes:
             super().mousePressEvent(event)
             return
@@ -948,7 +1049,9 @@ class PdfView(QAbstractScrollArea):
         # Le caselle di testo sono sopra a tutto (tranne le maniglie della firma selezionata),
         # anche sopra i campi; il campo ha la precedenza sulla firma.
         box, side = self._hit_box(pos) if corner is None else (None, None)
-        field = self._field_at(pos) if corner is None and box is None else None
+        # I tratti stanno sotto le caselle ma sopra i campi e le firme.
+        ink = self._ink_at(pos) if corner is None and box is None else None
+        field = self._field_at(pos) if corner is None and box is None and ink is None else None
         if field is not None:
             self._placements.select(None)
             self._annotations.select(None)
@@ -963,6 +1066,13 @@ class PdfView(QAbstractScrollArea):
             self._placements.select(None)
             self._annotations.select(box)
             self._box_drag = (box, to_qrect(box.rect), self.to_page_point(box.page, pos), side)
+            self._update_cursor()
+            event.accept()
+            return
+        if ink is not None:
+            self._placements.select(None)
+            self._annotations.select(ink)
+            self._ink_drag = (ink, {"strokes": ink.strokes, "rect": ink.rect}, self.to_page_point(ink.page, pos))
             self._update_cursor()
             event.accept()
             return
@@ -988,6 +1098,15 @@ class PdfView(QAbstractScrollArea):
             delta = pos - start
             self.horizontalScrollBar().setValue(round(x - delta.x()))
             self.verticalScrollBar().setValue(round(y - delta.y()))
+        elif self._stroke is not None:
+            self._extend_stroke(pos)
+        elif self._erasing is not None:
+            self._erase_to(pos)
+        elif self._ink_drag is not None:
+            ink, start, start_pt = self._ink_drag
+            delta = self.to_page_point(ink.page, pos) - start_pt
+            values = moved_ink(start["strokes"], ink.width, delta.x(), delta.y(), self._sizes[ink.page])
+            self._annotations.preview(ink, **values)
         elif self._drag is not None:
             placement, start_rect, start, corner = self._drag
             pt = self.to_page_point(placement.page, pos)
@@ -1020,6 +1139,16 @@ class PdfView(QAbstractScrollArea):
             if event.button() == self._pan[0]:
                 self._pan = None
                 self._update_cursor()
+        elif self._stroke is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._extend_stroke(event.position(), end=True)
+            self._finish_stroke()
+        elif self._erasing is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._erasing = None
+        elif self._ink_drag is not None and event.button() == Qt.MouseButton.LeftButton:
+            ink, start, _ = self._ink_drag
+            self._ink_drag = None
+            self._annotations.set_values(ink, start, "spostamento tratto")
+            self._update_cursor()
         elif self._drag is not None and event.button() == Qt.MouseButton.LeftButton:
             placement, start_rect, _, corner = self._drag
             self._drag = None
@@ -1045,7 +1174,7 @@ class PdfView(QAbstractScrollArea):
         pos = event.position()
         if (
             event.button() == Qt.MouseButton.LeftButton and self._placing is None and self._text_tool is None
-            and not self.panning
+            and self._draw_tool is None and not self.panning
         ):
             box, side = self._hit_box(pos)
             if box is not None and side is None:
@@ -1063,7 +1192,7 @@ class PdfView(QAbstractScrollArea):
 
     def viewportEvent(self, event) -> bool:
         # Il mouse esce dalla vista: l'anteprima del posizionamento sparisce.
-        if event.type() == QEvent.Type.Leave and self._drag is None and self._pan is None:
+        if event.type() == QEvent.Type.Leave and self._drag is None and self._pan is None and self._stroke is None:
             self._cursor_pos = None
             if self._placing is not None:
                 self.viewport().update()
@@ -1380,11 +1509,22 @@ class PdfView(QAbstractScrollArea):
         dpr = self.devicePixelRatioF()
         scale = self._scale() * dpr
         for item in self._annotations.items:
-            if isinstance(item, TextBox) and item.page in visible and item is not self._editing_box:
+            if isinstance(item, Ink) and item.page in visible:
+                self._paint_ink(painter, item)
+            elif isinstance(item, TextBox) and item.page in visible and item is not self._editing_box:
                 target = self.page_rect_to_viewport(item.page, to_qrect(item.rect))
                 image = self._annotations.image(item, scale)
                 image.setDevicePixelRatio(dpr)
                 painter.drawImage(target.topLeft(), image)
+        self._paint_stroke(painter)
+
+        selected = self._annotations.selected
+        if isinstance(selected, Ink) and selected.page in visible:
+            pen = QPen(SELECTION, 1, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(self.page_rect_to_viewport(selected.page, to_qrect(selected.rect)).adjusted(-3, -3, 3, 3))
 
         if self._editing_box is not None and self._editor is not None:
             rect, handles = QRectF(self._editor.geometry()), False
@@ -1495,6 +1635,159 @@ class PdfView(QAbstractScrollArea):
                 self._annotations.update(box, "modifica testo", text=text, rect=to_tuple(rect))
         finally:
             self._committing = False
+
+
+    # --- Disegno -------------------------------------------------------------------------
+
+    def _ink_at(self, pos: QPointF) -> Ink | None:
+        """Tratto di PieDF sotto il punto della vista (quelli di altri programmi non contano)."""
+        page = self.page_at(pos)
+        if page is None:
+            return None
+        pt = self.to_page_point(page, pos)
+        return self._annotations.ink_at(page, (pt.x(), pt.y()), INK_HIT_PX / self._scale())
+
+    def _stroke_style(self) -> tuple[str, float, float]:
+        """Colore, spessore (punti) e opacità del prossimo tratto."""
+        if self._draw_tool == HIGHLIGHTER:
+            return self.draw_style["highlighter_color"], HIGHLIGHTER_WIDTH, HIGHLIGHTER_OPACITY
+        return self.draw_style["pen_color"], self.draw_style["pen_width"], 1.0
+
+    def _page_point(self, page: int, pos: QPointF) -> tuple[float, float]:
+        """Punto della vista → punti della pagina, fermato al bordo: il tratto non esce dalla pagina."""
+        pt = self.to_page_point(page, pos)
+        w, h = self._sizes[page]
+        return (max(0.0, min(pt.x(), w)), max(0.0, min(pt.y(), h)))
+
+    def _draw_press(self, pos: QPointF) -> None:
+        if self._draw_tool == ERASER:
+            self._erasing = pos
+            self._erase_at(pos)
+            return
+        self._finish_stroke()  # il rilascio del tratto di prima non è arrivato
+        page = self.page_at(pos)
+        if page is None:
+            return
+        pt = self._page_point(page, pos)
+        self._stroke = (page, [pt], QPainterPath(QPointF(*pt)))
+        self.viewport().update()
+
+    def _extend_stroke(self, pos: QPointF, end: bool = False) -> None:
+        """Aggiunge il punto al tratto in corso; con `end` (rilascio) il tratto finisce proprio lì."""
+        page, points, path = self._stroke
+        x, y = self._page_point(page, pos)
+        last = points[-1]
+        # Punti troppo vicini aggiungono solo rumore: il mouse dà pixel interi, e con un pixel
+        # di distanza la semplificazione dovrebbe tenere tutti gli scalini.
+        distance = math.hypot(x - last[0], y - last[1]) * self._scale()
+        if distance < STROKE_MIN_PX and not (end and distance > 0):
+            return
+        points.append((x, y))
+        # La curva cresce un pezzo alla volta, come `smooth_points` (che dà i punti salvati).
+        path.quadTo(QPointF(*last), QPointF((last[0] + x) / 2, (last[1] + y) / 2))
+        self.viewport().update()
+
+    def _finish_stroke(self) -> None:
+        """Il tratto in corso diventa un'annotazione: levigato, semplificato, un passo di annulla."""
+        stroke, self._stroke = self._stroke, None
+        if stroke is None:
+            return
+        page, points, _ = stroke
+        color, width, opacity = self._stroke_style()
+        strokes = (tuple(simplify(smooth_points(points))),)
+        ink = Ink(page, ink_rect(strokes, width), strokes=strokes, color=color, width=width, opacity=opacity)
+        self._annotations.add(ink, select=False)
+        self.viewport().update()
+
+    def _erase_at(self, pos: QPointF) -> None:
+        ink = self._ink_at(pos)
+        if ink is not None:
+            self._annotations.remove(ink)  # tutto il tratto, un passo di annulla
+
+    def _erase_to(self, pos: QPointF) -> None:
+        """Gomma trascinata: si controllano anche i punti tra un evento e l'altro (mouse veloce)."""
+        start = self._erasing
+        steps = max(1, math.ceil(math.hypot(pos.x() - start.x(), pos.y() - start.y()) / INK_HIT_PX))
+        for i in range(1, steps + 1):
+            self._erase_at(start + (pos - start) * (i / steps))
+        self._erasing = pos
+
+    def _ink_transform(self, painter: QPainter, page: int) -> None:
+        """Il painter disegna in punti PDF della pagina."""
+        rect = self._page_rect(page)
+        painter.translate(rect.x() - self.horizontalScrollBar().value(), rect.y() - self.verticalScrollBar().value())
+        painter.scale(self._scale(), self._scale())
+
+    def _ink_pen(self, color: str, width: float, opacity: float) -> QPen:
+        # Opacità nel colore: ogni tratto si dipinge una volta sola, anche dove si sovrappone a sé
+        # stesso, come nel PDF. Estremi e giunti tondi come nell'aspetto che scrive MuPDF.
+        qcolor = QColor(color)
+        qcolor.setAlphaF(opacity)
+        return QPen(qcolor, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+
+    def _paint_ink(self, painter: QPainter, ink: Ink) -> None:
+        cached = self._polygons.get(id(ink))
+        if cached is None or cached[0] is not ink.strokes:
+            if len(self._polygons) > 2000:
+                self._polygons.clear()
+            cached = (ink.strokes, [QPolygonF([QPointF(x, y) for x, y in s]) for s in ink.strokes])
+            self._polygons[id(ink)] = cached
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._ink_transform(painter, ink.page)
+        painter.setPen(self._ink_pen(ink.color, ink.width, ink.opacity))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for polygon in cached[1]:
+            if polygon.size() == 1:
+                painter.drawLine(polygon[0], polygon[0])  # un puntino
+            else:
+                painter.drawPolyline(polygon)
+        painter.restore()
+
+    def _paint_stroke(self, painter: QPainter) -> None:
+        """Il tratto in corso, in sovrimpressione: niente render nuovi mentre si disegna."""
+        if self._stroke is None:
+            return
+        page, points, path = self._stroke
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._ink_transform(painter, page)
+        painter.setPen(self._ink_pen(*self._stroke_style()))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if len(points) == 1:
+            painter.drawLine(QPointF(*points[0]), QPointF(*points[0]))
+        else:
+            tail = QPainterPath(path)
+            tail.lineTo(QPointF(*points[-1]))
+            painter.drawPath(tail)
+        painter.restore()
+
+
+def _tool_cursor(tool: str) -> QCursor:
+    """Croce per la penna, una punta larga per l'evidenziatore, una gomma."""
+    if tool == PEN:
+        return QCursor(Qt.CursorShape.CrossCursor)
+    cursor = _CURSORS.get(tool)
+    if cursor is None:
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor("#202020"), 1))
+        if tool == HIGHLIGHTER:
+            painter.setBrush(QColor(255, 230, 0, 170))
+            painter.drawRect(QRectF(12.5, 6.5, 7, 19))
+        else:
+            painter.translate(16, 16)
+            painter.rotate(-35)
+            painter.setBrush(QColor("#f4f4f4"))
+            painter.drawRoundedRect(QRectF(-10, -6, 20, 12), 2, 2)
+            painter.setBrush(QColor("#e06080"))
+            painter.drawRoundedRect(QRectF(-10, -6, 8, 12), 2, 2)
+        painter.end()
+        cursor = QCursor(pixmap, 16, 16)
+        _CURSORS[tool] = cursor
+    return cursor
 
 
 def _moved(start: QPointF, pos: QPointF) -> bool:

@@ -32,7 +32,7 @@ maiuscole: con `case` si tengono solo i risultati il cui testo coincide anche ne
 I rettangoli sono nello spazio della pagina come si vede, come quelli dei link
 (`search_for` li dà nella pagina non ruotata: verificato con /Rotate 90).
 
-Le annotazioni di PieDF (caselle di testo) le disegna la vista dal suo modello: qui si
+Le annotazioni di PieDF (caselle di testo e tratti) le disegna la vista dal suo modello: qui si
 cancellano dal documento in memoria prima del primo render di ogni pagina, così non
 compaiono due volte. Il file non si tocca.
 

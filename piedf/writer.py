@@ -2,8 +2,8 @@
 (senza Qt nella logica: i rettangoli arrivano da `Placement`).
 
 Ogni firma diventa un'immagine sopra la pagina (`page.insert_image`); i campi restano
-campi (si scrive solo il valore e il suo aspetto); le caselle di testo restano annotazioni
-FreeText modificabili. Il resto del documento non viene toccato né rasterizzato.
+campi (si scrive solo il valore e il suo aspetto); le caselle di testo e i tratti restano
+annotazioni (FreeText e Ink) modificabili. Il resto del documento non viene toccato né rasterizzato.
 """
 
 import os
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pymupdf
 
-from piedf.document import TextBox, add_text_box, set_field_value
+from piedf.document import Ink, TextBox, add_ink, add_text_box, set_field_value
 
 TMP_SUFFIX = ".piedf-tmp"
 
@@ -74,6 +74,8 @@ def save_with_signatures(
             for item in items:
                 if isinstance(item, TextBox):
                     add_text_box(doc[item.page], item)
+                elif isinstance(item, Ink):
+                    add_ink(doc[item.page], item)
 
         xrefs: dict[Path, int] = {}  # stesso PNG piazzato più volte → una sola copia nel file
         for pl in placements:

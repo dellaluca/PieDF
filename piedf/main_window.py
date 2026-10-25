@@ -28,7 +28,22 @@ from PySide6.QtWidgets import (
 )
 
 from piedf import paths
-from piedf.annotations import COLORS, DEFAULT_STYLE, FONT_LABELS, MAX_SIZE, MIN_SIZE, Annotations
+from piedf.annotations import (
+    COLORS,
+    DEFAULT_DRAW,
+    DEFAULT_STYLE,
+    ERASER,
+    FONT_LABELS,
+    HIGHLIGHTER,
+    HIGHLIGHTER_COLORS,
+    MAX_SIZE,
+    MIN_SIZE,
+    PEN,
+    PEN_COLORS,
+    PEN_WIDTHS,
+    TOOL_LABELS,
+    Annotations,
+)
 from piedf.document import OpenError, PasswordRequired, PdfDocument, open_document
 from piedf.forms import FormValues
 from piedf.page_ops import MAIN, PageRef
@@ -53,6 +68,8 @@ MENU_THUMB = QSize(160, 52)
 PLACING_HINT = "Clic per posizionare la firma · Esc per annullare"
 TEXT_HINT = "Clic sulla pagina per scrivere · Esc per annullare"
 DATE_HINT = "Clic sulla pagina per inserire la data · Esc per annullare"
+DRAW_HINT = "Trascina sulla pagina per disegnare · Esc per finire"
+ERASER_HINT = "Clic o trascina su un tratto per cancellarlo · Esc per finire"
 ALIGN_LABELS = ["Sinistra", "Centro", "Destra"]
 FORM_MESSAGE = "Questo documento contiene campi compilabili."
 XFA_MESSAGE = "Questo modulo usa una tecnologia (XFA) che PieDF non supporta: i campi non si possono compilare."
@@ -122,6 +139,8 @@ class MainWindow(QMainWindow):
         self.view.text_tool_changed.connect(self._on_text_tool_changed)
         self.view.text_box_changed.connect(self._update_text_bar)
         self.view.text_style = self._text_style()
+        self.view.draw_style = self._draw_style()
+        self.view.draw_tool_changed.connect(self._on_draw_tool_changed)
         self.view.set_highlight(self._settings.value("highlight_fields", True, type=bool))
         self.search_bar = SearchBar(self.view, self._renderer, self.annotations)
         self.search_bar.show_hit.connect(self._show_search_hit)
@@ -190,6 +209,18 @@ class MainWindow(QMainWindow):
         self.act_find = self._action("&Trova…", self.search_bar.open_bar, [QKeySequence.StandardKey.Find])
         self.act_find_next = self._action("Trova &successivo", self.search_bar.next, ["F3"])
         self.act_find_prev = self._action("Trova &precedente", self.search_bar.previous, ["Shift+F3"])
+        # Disegna: accende l'ultimo strumento usato, o lo spegne (come Esc).
+        self.act_draw = self._action("&Disegna", self._toggle_draw, ["Ctrl+D"])
+        self.act_draw.setCheckable(True)
+        self.draw_actions = {}
+        self._draw_group = QActionGroup(self)
+        self._draw_group.setExclusionPolicy(QActionGroup.ExclusionPolicy.ExclusiveOptional)
+        for tool, label in TOOL_LABELS.items():
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked, t=tool: self.set_draw_tool(t if checked else None))
+            self._draw_group.addAction(action)
+            self.draw_actions[tool] = action
 
         self.act_organize = self._action("&Organizza pagine…", lambda: self.organize_pages(), ["Ctrl+Shift+O"])
         self.act_merge = self._action("&Unisci PDF…", self.merge_files)
@@ -210,6 +241,7 @@ class MainWindow(QMainWindow):
             self.act_fit_page, self.act_fit_width, self.act_prev, self.act_next, self.act_goto,
             self.act_text, self.act_date, self.act_organize, self.act_rotate_left, self.act_rotate_right,
             self.act_find, self.act_find_next, self.act_find_prev,
+            self.act_draw, *self.draw_actions.values(),
         ]
 
     def _build_menu(self) -> None:
@@ -263,6 +295,10 @@ class MainWindow(QMainWindow):
         sign_menu.addSeparator()
         sign_menu.addAction(self.act_text)
         sign_menu.addAction(self.act_date)
+        sign_menu.addSeparator()
+        self._build_draw_menu()
+        sign_menu.addAction(self.act_draw)
+        sign_menu.addMenu(self.draw_menu)
 
     def _build_toolbar(self) -> None:
         bar = QToolBar("Strumenti")
@@ -324,8 +360,90 @@ class MainWindow(QMainWindow):
         self.act_date.setToolTip("Aggiungi la data di oggi")
         bar.addAction(self.act_text)
         bar.addAction(self.act_date)
+        # Clic sul pulsante: accende o spegne il disegno; la freccia apre strumenti e colori.
+        self.draw_button = QToolButton()
+        self.draw_button.setDefaultAction(self.act_draw)
+        self.draw_button.setToolTip("Disegna a mano libera: penna, evidenziatore, gomma (Ctrl+D)")
+        self.draw_button.setMenu(self.draw_menu)
+        self.draw_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        bar.addWidget(self.draw_button)
 
-        self._doc_widgets = [self._page_box, self._zoom_box, self.sign_button]
+        self._doc_widgets = [self._page_box, self._zoom_box, self.sign_button, self.draw_button]
+
+    def _build_draw_menu(self) -> None:
+        """Strumenti di disegno, colori e spessori: scegliere un colore accende il suo strumento."""
+        menu = QMenu("Strumenti di &disegno", self)
+        for action in self.draw_actions.values():
+            menu.addAction(action)
+        menu.addSeparator()
+        self.draw_option_actions = {}
+        for title, key, options, tool in (
+            ("Colore penna", "pen_color", PEN_COLORS, PEN),
+            ("Spessore penna", "pen_width", PEN_WIDTHS, PEN),
+            ("Colore evidenziatore", "highlighter_color", HIGHLIGHTER_COLORS, HIGHLIGHTER),
+        ):
+            submenu = menu.addMenu(title)
+            group = QActionGroup(self)
+            for value, label in options.items():
+                action = QAction(label, self)
+                if key == "pen_width":
+                    action.setText(f"{label} ({value:g} pt)")
+                else:
+                    swatch = QPixmap(12, 12)
+                    swatch.fill(QColor(value))
+                    action.setIcon(QIcon(swatch))
+                action.setCheckable(True)
+                action.setChecked(self.view.draw_style[key] == value)
+                action.triggered.connect(lambda _=False, k=key, v=value, t=tool: self.set_draw_option(k, v, t))
+                group.addAction(action)
+                submenu.addAction(action)
+                self.draw_option_actions[(key, value)] = action
+        self.draw_menu = menu
+
+    def _draw_style(self) -> dict:
+        """Strumento, colori e spessore del disegno, ricordati in settings.ini."""
+        s = self._settings
+        style = {
+            "tool": s.value("draw/tool", DEFAULT_DRAW["tool"], type=str),
+            "pen_color": s.value("draw/pen_color", DEFAULT_DRAW["pen_color"], type=str),
+            "pen_width": s.value("draw/pen_width", DEFAULT_DRAW["pen_width"], type=float),
+            "highlighter_color": s.value("draw/highlighter_color", DEFAULT_DRAW["highlighter_color"], type=str),
+        }
+        for key, options in (("tool", TOOL_LABELS), ("pen_color", PEN_COLORS), ("pen_width", PEN_WIDTHS),
+                             ("highlighter_color", HIGHLIGHTER_COLORS)):
+            if style[key] not in options:
+                style[key] = DEFAULT_DRAW[key]
+        return style
+
+    def set_draw_tool(self, tool: str | None) -> None:
+        if tool is None:
+            self.view.cancel_draw_tool()
+        else:
+            self._settings.setValue("draw/tool", tool)
+            self.view.draw_style["tool"] = tool
+            self.view.start_draw_tool(tool)
+        self._on_draw_tool_changed(self.view.draw_tool)  # anche se non è cambiato (es. nessun documento)
+
+    def set_draw_option(self, key: str, value, tool: str) -> None:
+        """Colore o spessore: diventa il default e accende lo strumento che lo usa."""
+        self._settings.setValue(f"draw/{key}", value)
+        self.view.draw_style[key] = value
+        self.set_draw_tool(tool)
+
+    def _toggle_draw(self) -> None:
+        if self.view.draw_tool is not None:
+            self.set_draw_tool(None)
+        else:
+            self.set_draw_tool(self.view.draw_style["tool"])
+
+    def _on_draw_tool_changed(self, tool) -> None:
+        self.act_draw.setChecked(tool is not None)
+        for name, action in self.draw_actions.items():
+            action.setChecked(name == tool)
+        if tool is not None:
+            self.statusBar().showMessage(ERASER_HINT if tool == ERASER else DRAW_HINT)
+        elif self.statusBar().currentMessage() in (DRAW_HINT, ERASER_HINT):
+            self.statusBar().clearMessage()
 
     def _build_text_bar(self) -> None:
         """Proprietà della casella di testo: visibile solo con una casella selezionata o in modifica.

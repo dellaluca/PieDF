@@ -1,4 +1,4 @@
-"""Annotazioni modificabili di PieDF (caselle di testo; poi il disegno, #22), in memoria.
+"""Annotazioni modificabili di PieDF (caselle di testo e tratti del disegno, #22), in memoria.
 
 A differenza delle firme non si "cuociono" nel PDF: si salvano come annotazioni con titolo
 "PieDF" e alla riapertura tornano nel modello (`PdfDocument.annotations`), modificabili.
@@ -14,7 +14,8 @@ import pymupdf
 from PySide6.QtCore import QObject, QRectF, Signal
 from PySide6.QtGui import QImage, QUndoCommand, QUndoStack
 
-from piedf.document import FONTS, Annotation, TextBox, add_text_box, longest_word, text_box_height
+from piedf.document import FONTS, Annotation, Ink, TextBox, add_text_box, ink_rect, longest_word, text_box_height
+from piedf.ink import bounds, stroke_distance, translated
 
 FONT_LABELS = {"Helv": "Helvetica", "TiRo": "Times", "Cour": "Courier"}
 COLORS = {"#000000": "Nero", "#1a3fbf": "Blu", "#c00000": "Rosso"}
@@ -23,6 +24,16 @@ DEFAULT_STYLE = {"font": FONTS[0], "size": 11.0, "color": "#000000", "align": 0}
 NEW_BOX_WIDTH = 180.0  # punti
 MIN_BOX_WIDTH = 20.0  # punti
 IMAGE_CACHE = 200  # immagini delle caselle tenute in memoria
+
+# Disegno (#22): strumenti, colori e spessori.
+PEN, HIGHLIGHTER, ERASER = "pen", "highlighter", "eraser"
+TOOL_LABELS = {PEN: "Penna", HIGHLIGHTER: "Evidenziatore", ERASER: "Gomma"}
+PEN_COLORS = {"#000000": "Nero", "#1a3fbf": "Blu", "#c00000": "Rosso", "#1e8c3a": "Verde"}
+PEN_WIDTHS = {1.0: "Sottile", 2.0: "Medio", 4.0: "Spesso"}
+HIGHLIGHTER_COLORS = {"#ffe600": "Giallo", "#5fe05f": "Verde", "#ff7ac0": "Rosa"}
+HIGHLIGHTER_WIDTH = 12.0
+HIGHLIGHTER_OPACITY = 0.35
+DEFAULT_DRAW = {"tool": PEN, "pen_color": "#000000", "pen_width": 2.0, "highlighter_color": "#ffe600"}
 
 
 def to_qrect(rect: tuple[float, float, float, float]) -> QRectF:
@@ -51,6 +62,16 @@ def fitted_rect(box: TextBox, rect: QRectF, page_size: tuple[float, float] | Non
         rect.moveLeft(max(0.0, min(rect.x(), page_w - rect.width())))
         rect.moveTop(max(0.0, min(rect.y(), page_h - rect.height())))
     return rect
+
+
+def moved_ink(strokes, width: float, dx: float, dy: float, page_size: tuple[float, float]) -> dict:
+    """Tratti e rettangolo spostati di (dx, dy), con i punti dentro la pagina."""
+    x0, y0, x1, y1 = bounds(strokes)
+    page_w, page_h = page_size
+    dx = max(-x0, min(dx, page_w - x1)) if x1 - x0 <= page_w else 0.0
+    dy = max(-y0, min(dy, page_h - y1)) if y1 - y0 <= page_h else 0.0
+    strokes = translated(strokes, dx, dy)
+    return {"strokes": strokes, "rect": ink_rect(strokes, width)}
 
 
 def _state(item: Annotation) -> tuple:
@@ -108,8 +129,9 @@ class Annotations(QObject):
 
     # --- Modifiche (ognuna è un passo di annulla) --------------------------------------
 
-    def add(self, item: Annotation) -> None:
-        self.undo_stack.push(_AddCommand(self, item))
+    def add(self, item: Annotation, select: bool = True) -> None:
+        """`select=False` per i tratti: lo strumento di disegno resta attivo, niente selezione."""
+        self.undo_stack.push(_AddCommand(self, item, select))
 
     def remove(self, item: Annotation) -> None:
         self.undo_stack.push(_RemoveCommand(self, item))
@@ -130,11 +152,38 @@ class Annotations(QObject):
         item.rect = to_tuple(rect)
         self.changed.emit()
 
+    def preview(self, item: Annotation, **values) -> None:
+        """Cambia attributi durante un trascinamento (i punti di un tratto), senza passo di annulla."""
+        for key, value in values.items():
+            setattr(item, key, value)
+        self.changed.emit()
+
+    def set_values(self, item: Annotation, old: dict, label: str) -> None:
+        """Registra un cambio già applicato dal vivo: `old` sono i valori di prima."""
+        new = {k: getattr(item, k) for k in old}
+        if old != new and item in self.items:
+            self.undo_stack.push(_ChangeCommand(self, item, old, new, label))
+
+    def ink_at(self, page: int, pt: tuple[float, float], tolerance: float) -> Ink | None:
+        """Tratto della pagina sotto il punto (punti PDF): distanza sotto metà spessore o `tolerance`."""
+        x, y = pt
+        for item in reversed(self.items):  # quello disegnato sopra vince
+            if not isinstance(item, Ink) or item.page != page:
+                continue
+            reach = max(item.width / 2, tolerance)
+            x0, y0, x1, y1 = item.rect
+            if not (x0 - reach <= x <= x1 + reach and y0 - reach <= y <= y1 + reach):
+                continue
+            if any(stroke_distance(pt, stroke) <= reach for stroke in item.strokes):
+                return item
+        return None
+
     # --- Usati dai comandi -------------------------------------------------------------
 
-    def _insert(self, index: int, item: Annotation) -> None:
+    def _insert(self, index: int, item: Annotation, select: bool = True) -> None:
         self.items.insert(index, item)
-        self.selected = item
+        if select:
+            self.selected = item
         self.changed.emit()
 
     def _take(self, item: Annotation) -> int:
@@ -169,17 +218,19 @@ def _render(box: TextBox, scale: float) -> QImage:
 
 
 def _label(item: Annotation) -> str:
-    return "casella di testo" if isinstance(item, TextBox) else "annotazione"
+    if isinstance(item, TextBox):
+        return "casella di testo"
+    return "tratto" if isinstance(item, Ink) else "annotazione"
 
 
 class _AddCommand(QUndoCommand):
-    def __init__(self, model: Annotations, item: Annotation) -> None:
+    def __init__(self, model: Annotations, item: Annotation, select: bool) -> None:
         super().__init__(f"inserimento {_label(item)}")
-        self._model, self._item = model, item
+        self._model, self._item, self._select = model, item, select
         self._index = len(model.items)
 
     def redo(self) -> None:
-        self._model._insert(self._index, self._item)
+        self._model._insert(self._index, self._item, self._select)
 
     def undo(self) -> None:
         self._model._take(self._item)
@@ -195,7 +246,8 @@ class _RemoveCommand(QUndoCommand):
         self._index = self._model._take(self._item)
 
     def undo(self) -> None:
-        self._model._insert(self._index, self._item)
+        # Un tratto cancellato (spesso con la gomma, a strumento attivo) torna senza selezione.
+        self._model._insert(self._index, self._item, not isinstance(self._item, Ink))
 
 
 class _ChangeCommand(QUndoCommand):

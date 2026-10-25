@@ -8,6 +8,7 @@ import queue
 import shutil
 import sys
 import time
+from multiprocessing import shared_memory
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -462,12 +463,16 @@ def main():
     check("stampa: con caselle non salvate si stampa un temporaneo", temp is not None
           and any(f["text"] == "Sopra il link" for f in freetexts(path)))
     results_q, acks = queue.Queue(), queue.Queue()
-    render_worker.print_pages(path, None, [(0, 1.0)], acks, results_q)
+    # Le pagine arrivano nella memoria condivisa (#34), non nel messaggio.
+    shm = shared_memory.SharedMemory(create=True, size=595 * 842 * 3 * 2)
+    render_worker.print_pages(path, None, [(0, 1.0)], [shm.name], acks, results_q)
     msg = results_q.get(timeout=10)
     pix = None
     if msg[0] == "page":
-        _, _, width, height, stride, samples = msg
-        pix = pymupdf.Pixmap(pymupdf.csRGB, width, height, samples, False)
+        _, _, width, height, stride, _ = msg
+        pix = pymupdf.Pixmap(pymupdf.csRGB, width, height, bytes(shm.buf[:stride * height]), False)
+    shm.close()
+    shm.unlink()
     check("stampa: il processo di stampa disegna la casella", pix is not None and inked(pix, box.rect) > 20)
     remove_quietly(temp)
     path, temp = print_source(str(out1), None, [], {}, [], None)
