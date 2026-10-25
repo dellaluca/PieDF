@@ -116,6 +116,20 @@ def main():
         doc.close()
         return info
 
+    def raster(path, page):
+        """(larghezza, altezza, RGB) della pagina stampata, rimettendo insieme le strisce."""
+        doc = pymupdf.open(path)
+        bands = sorted(doc[page].get_image_info(xrefs=True), key=lambda b: b["bbox"][1])
+        rows, width = [], 0
+        for k, b in enumerate(bands):
+            pix = pymupdf.Pixmap(doc, b["xref"])
+            width = pix.width
+            keep = pix.height if k == len(bands) - 1 else pix.height - 1  # la riga in più
+            rows.append(pix.samples[:keep * pix.stride])
+        doc.close()
+        data = b"".join(rows)
+        return width, len(data) // (3 * width), data
+
     def mapped(bbox, rect, page_w):
         """Rettangolo in punti della pagina originale → punti del foglio (pagina non ruotata)."""
         s = bbox.width / page_w
@@ -155,6 +169,19 @@ def main():
     blank = mapped(bbox, pymupdf.Rect(72, 300, 330, 330), 595)
     check("1. bianco fuori dal testo", count(out, 0, blank, dark) == 0)
     check("1. adatta: occupa l'area stampabile", abs(bbox.width - 575) < 2 or abs(bbox.height - 822) < 2, str(bbox))
+    # Stessa risoluzione del render della pagina e nessuna perdita visibile (#34). Il motore PDF
+    # di Qt salva le strisce in JPEG: qualche artefatto sui bordi del testo, non di più.
+    width, height, data = raster(out, 0)
+    src_doc = pymupdf.open(PDFS / "semplice.pdf")
+    s = width / src_doc[0].rect.width
+    ref = src_doc[0].get_pixmap(matrix=pymupdf.Matrix(s, s), alpha=False)
+    src_doc.close()
+    sample = range(0, min(len(data), len(ref.samples)), 7)
+    err = sum(abs(data[i] - ref.samples[i]) for i in sample) / len(sample)
+    far = sum(1 for i in sample if abs(data[i] - ref.samples[i]) > 32) / len(sample)
+    check("1. risoluzione del render, nessuna perdita visibile",
+          (width, height) == (ref.width, ref.height) and err < 0.5 and far < 0.001,
+          f"{width}x{height}, errore medio {err:.2f}, {far * 100:.3f}% oltre 32")
     check("1. avanzamento chiuso", not [d for d in w.findChildren(QProgressDialog) if d.isVisible()])
     check("1. scelte salvate", w._settings.value("print/fit", type=bool) is True
           and w._settings.value("print/auto_rotate", type=bool) is True)
@@ -339,6 +366,7 @@ def main():
           f"annullata a {stopped}, ultima {last[-1:]}")
     check("6. nessun temporaneo", tmp_files() == [], str(tmp_files()))
     check("6. processo di stampa chiuso", not job._process.is_alive())
+    check("6. memoria condivisa liberata", job._slots == [])
     check("6. nessun errore", not errors, str(errors))
     w.placements.clear()
 

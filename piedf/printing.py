@@ -205,8 +205,11 @@ class PrintJob(QObject):
         for shm in self._slots:
             try:
                 shm.close()
-                shm.unlink()
-            except (BufferError, OSError):
+            except BufferError:  # un'immagine ancora viva dopo un errore: la libera il GC
+                pass
+            try:
+                shm.unlink()  # su Windows non fa niente: la memoria va via con l'ultimo handle
+            except OSError:
                 pass
         self._slots = []
         if self._temp is not None:
