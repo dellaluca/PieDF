@@ -266,12 +266,29 @@ def thumbnails(requests, results) -> None:
 def _search(page, text: str, case: bool, check_text: bool) -> tuple[list[tuple], bool]:
     """Risultati di `text` nella pagina, nello spazio come si vede, e se la pagina ha testo
     (controllato solo con `check_text`: basta una pagina per saperlo)."""
+    import pymupdf
+
     textpage = page.get_textpage()
     has_text = check_text and bool(textpage.extractText().strip())
     rects = page.search_for(text, textpage=textpage)
-    if case:
+    if case and rects:
         wanted = " ".join(text.split())
-        rects = [r for r in rects if wanted in " ".join(page.get_textbox(r, textpage=textpage).split())]
+        # Caratteri della pagina presi una volta sola (get_textbox per ogni risultato costa
+        # ~45 ms). Un risultato su più righe arriva a pezzi: ogni pezzo è una parte del testo.
+        lines = [
+            (pymupdf.Rect(line["bbox"]), [(pymupdf.Rect(c["bbox"]), c["c"]) for span in line["spans"] for c in span["chars"]])
+            for block in textpage.extractRAWDICT()["blocks"] if block["type"] == 0
+            for line in block["lines"]
+        ]
+
+        def exact(r) -> bool:
+            found = " ".join("".join(
+                c for line_rect, chars in lines if line_rect.intersects(r)
+                for box, c in chars if (box.tl + box.br) / 2 in r
+            ).split())
+            return bool(found) and (wanted in found or found in wanted)
+
+        rects = [r for r in rects if exact(r)]
     m = page.rotation_matrix
     rects = [r * m for r in rects]
     return [(r.x0, r.y0, r.x1, r.y1) for r in rects], has_text
