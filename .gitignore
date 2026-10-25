@@ -16,3 +16,6 @@ data/
 
 # Output dei test (PDF generati, screenshot)
 tests/out/
+
+# Nessun PDF nel repo: quelli di prova si generano con tests/make_test_pdfs.py
+*.pdf

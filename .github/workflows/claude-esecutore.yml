@@ -110,8 +110,9 @@ jobs:
           fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if [ -n "$(git status --porcelain -- . ':!.github/workflows')" ]; then
-            git add -A -- . ':!.github/workflows'
+          # Niente workflow (il token non può) e niente PDF (sono quelli di prova generati).
+          if [ -n "$(git status --porcelain -- . ':!.github/workflows' ':!*.pdf')" ]; then
+            git add -A -- . ':!.github/workflows' ':!*.pdf'
             git commit -q -m "Lavoro non salvato dalla sessione (salvataggio automatico)"
           fi
           if [ -z "$(git log --oneline origin/main..HEAD)" ]; then echo "Nessun commit nuovo"; exit 0; fi
