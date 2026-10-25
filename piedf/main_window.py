@@ -3,6 +3,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
+from PySide6.QtPrintSupport import QAbstractPrintDialog, QPrintDialog, QPrinter, QPrinterInfo
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSpinBox,
     QToolBar,
@@ -29,6 +31,7 @@ from piedf.document import OpenError, PasswordRequired, PdfDocument, open_docume
 from piedf.forms import FormValues
 from piedf.placements import Placements
 from piedf.positions import Positions
+from piedf.printing import NO_PRINT_MESSAGE, PrintJob, PrintOptions, PrintOptionsDialog, can_print, print_source, selected_pages
 from piedf.renderer import Renderer
 from piedf.signature_dialog import SignatureDialog
 from piedf.signature_manager import SignatureManager, thumbnail_pixmap
@@ -88,6 +91,7 @@ class MainWindow(QMainWindow):
         # Cronologia dei link interni: posizioni (pagina, y in punti) come scroll_position.
         self._back: list[tuple[int, float]] = []
         self._forward: list[tuple[int, float]] = []
+        self._print_job: PrintJob | None = None
 
         self._renderer = Renderer(self)
         self._renderer.failed.connect(self._on_render_failed)
@@ -133,6 +137,7 @@ class MainWindow(QMainWindow):
         self.act_open = self._action("&Apri…", self._choose_file, [QKeySequence.StandardKey.Open])
         self.act_save = self._action("&Salva", self.save, [QKeySequence.StandardKey.Save])
         self.act_save_as = self._action("Salva &con nome…", self.save_as, ["Ctrl+Shift+S"])
+        self.act_print = self._action("S&tampa…", self.print_document, [QKeySequence.StandardKey.Print])
         self.act_close = self._action("&Chiudi", self.close_document, ["Ctrl+W"])
         # StandardKey.Quit non ha una scorciatoia su Windows.
         self.act_quit = self._action("&Esci", self.close, ["Ctrl+Q"])
@@ -166,7 +171,7 @@ class MainWindow(QMainWindow):
         self.addAction(self.act_redo)
 
         self._doc_actions = [
-            self.act_save_as, self.act_close, self.act_zoom_in, self.act_zoom_out, self.act_actual,
+            self.act_save_as, self.act_print, self.act_close, self.act_zoom_in, self.act_zoom_out, self.act_actual,
             self.act_fit_page, self.act_fit_width, self.act_prev, self.act_next, self.act_goto,
         ]
 
@@ -178,6 +183,8 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.act_save)
         file_menu.addAction(self.act_save_as)
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_print)
         file_menu.addSeparator()
         file_menu.addAction(self.act_close)
         file_menu.addSeparator()
@@ -216,6 +223,7 @@ class MainWindow(QMainWindow):
 
         bar.addAction(self.act_open)
         bar.addAction(self.act_save)
+        bar.addAction(self.act_print)
         bar.addSeparator()
 
         self.act_prev.setIconText("◀")
@@ -576,6 +584,102 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Salvato in {Path(dest).name}", 10000)
         return True
 
+    # --- Stampa -----------------------------------------------------------------------
+
+    def print_document(self) -> None:
+        if self._path is None or self._print_job is not None:
+            return
+        try:
+            allowed = can_print(self._path, self._password)
+        except Exception as e:
+            QMessageBox.critical(self, "Stampa non riuscita", f"Impossibile rileggere il documento.\n\nDettagli: {e}")
+            return
+        if not allowed:
+            QMessageBox.warning(self, "Stampa non consentita", NO_PRINT_MESSAGE)
+            return
+        self.view.cancel_placing()
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        name = self._settings.value("print/printer", "", type=str)
+        if name and name in QPrinterInfo.availablePrinterNames():
+            printer.setPrinterName(name)
+        options = self._ask_print(printer)
+        if options is None:
+            return
+        self._settings.setValue("print/fit", options.fit)
+        self._settings.setValue("print/auto_rotate", options.auto_rotate)
+        if printer.outputFormat() == QPrinter.OutputFormat.NativeFormat and printer.printerName():
+            self._settings.setValue("print/printer", printer.printerName())
+        self.start_print(printer, options)
+
+    def _ask_print(self, printer: QPrinter) -> PrintOptions | None:
+        """Opzioni di PieDF e poi il dialog di stampa di sistema; None se si annulla."""
+        saved = PrintOptions(
+            fit=self._settings.value("print/fit", True, type=bool),
+            auto_rotate=self._settings.value("print/auto_rotate", True, type=bool),
+        )
+        options_dialog = PrintOptionsDialog(saved, self)
+        if options_dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        count = self.view.page_count
+        printer.setFromTo(1, count)
+        dialog = QPrintDialog(printer, self)
+        dialog.setWindowTitle("Stampa")
+        dialog.setMinMax(1, count)
+        Option = QAbstractPrintDialog.PrintDialogOption
+        dialog.setOption(Option.PrintPageRange, True)
+        dialog.setOption(Option.PrintCurrentPage, True)
+        dialog.setOption(Option.PrintSelection, False)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return options_dialog.options()
+
+    def start_print(self, printer: QPrinter, options: PrintOptions) -> None:
+        pages = selected_pages(printer, self.view.page_count, self.view.current_page)
+        if not pages:
+            QMessageBox.warning(self, "Stampa", "Nessuna pagina da stampare nell'intervallo scelto.")
+            return
+        self.view.commit_editor()
+        try:
+            path, temp = print_source(
+                self._path, self._password, self.placements.items, self.placements.missing_pngs(),
+                self.forms.changed(),
+            )
+        except SaveError as e:
+            QMessageBox.critical(self, "Stampa non riuscita", str(e))
+            return
+        job = PrintJob(printer, path, self._password, pages, self.view.page_sizes, options, temp, self)
+        self._print_job = job
+        progress = QProgressDialog(f"Stampa pagina 1 di {job.total}…", "Annulla", 0, job.total, self)
+        progress.setWindowTitle("Stampa")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        progress.canceled.connect(job.cancel)
+
+        def on_progress(done: int, total: int) -> None:
+            progress.setValue(done)
+            if done < total:
+                progress.setLabelText(f"Stampa pagina {done + 1} di {total}…")
+
+        def on_finished(completed: bool, error: str) -> None:
+            progress.canceled.disconnect(job.cancel)
+            progress.close()
+            progress.deleteLater()
+            self._print_job = None
+            job.deleteLater()
+            if error:
+                QMessageBox.critical(self, "Stampa non riuscita", error)
+            elif completed:
+                self.statusBar().showMessage(f"Stampa inviata: {job.total} pagine", 10000)
+            else:
+                self.statusBar().showMessage("Stampa annullata", 10000)
+
+        job.progress.connect(on_progress)
+        job.finished.connect(on_finished)
+        job.start()
+
     def _on_render_failed(self, gen: int, message: str) -> None:
         if gen == self._gen:
             self.statusBar().showMessage(f"Errore di visualizzazione: {message}", 10000)
@@ -716,6 +820,9 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self._save_position()
+        if self._print_job is not None:
+            self._print_job.cancel()
+            self._print_job.wait()
         self._settings.sync()  # all'uscita Python può non distruggere QSettings
         self._renderer.shutdown()
         super().closeEvent(event)

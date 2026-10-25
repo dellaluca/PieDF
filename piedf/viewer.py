@@ -118,6 +118,10 @@ class PdfView(QAbstractScrollArea):
         return len(self._sizes)
 
     @property
+    def page_sizes(self) -> list[tuple[float, float]]:
+        return self._sizes
+
+    @property
     def current_page(self) -> int:
         return self._current
 

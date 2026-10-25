@@ -21,6 +21,8 @@ Link: `rect` (x0, y0, x1, y1) e `to` (x, y) sono in punti nello spazio della pag
 si vede (dopo /Rotate), come `page.rect`. `kind` è "goto" (interno: `page` e `to`, con
 None per le coordinate che la destinazione non indica) oppure "uri" (esterno: `uri`
 così com'è, anche file:, launch e link ad altri PDF; decide la GUI cosa seguire).
+
+La stampa (#25) usa un secondo processo, `print_pages`, che non tocca quello delle pagine visibili.
 """
 
 import math
@@ -89,6 +91,42 @@ def run(requests, results) -> None:
             results.put(("page", gen, page, scale, pix.width, pix.height, pix.stride, pix.samples))
         except Exception as e:
             results.put(("error", gen, f"Pagina {page + 1}: {e}"))
+
+
+# Pagine per la stampa già pronte e non ancora confermate dalla GUI: a 600 dpi un A4 occupa
+# circa 100 MB, quindi non si va avanti più di così.
+PRINT_AHEAD = 2
+
+
+def print_pages(path, password, items, acks, results) -> None:
+    """Processo di stampa: disegna `items` [(pagina, scala), ...] in ordine, uno alla volta.
+
+    Messaggi in uscita: ("page", n, width, height, stride, samples_rgb) per l'n-esimo elemento,
+    ("error", messaggio). Ogni pagina disegnata dalla GUI arriva confermata su `acks`.
+    Per annullare la GUI chiude il processo.
+    """
+    import pymupdf
+
+    try:
+        doc = pymupdf.open(path)
+        if doc.needs_pass and not doc.authenticate(password or ""):
+            raise ValueError("Password errata")
+    except Exception as e:
+        results.put(("error", str(e)))
+        return
+    acked = 0
+    for n, (page, scale) in enumerate(items):
+        while n - acked >= PRINT_AHEAD:
+            acks.get()
+            acked += 1
+        try:
+            pix = doc[page].get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
+        except Exception as e:
+            results.put(("error", f"Pagina {page + 1}: {e}"))
+            return
+        results.put(("page", n, pix.width, pix.height, pix.stride, pix.samples))
+        del pix
+    doc.close()
 
 
 def _links(doc, index: int) -> list[dict]:

@@ -302,6 +302,14 @@ def main():
     key(Qt.Key.Key_Escape)
     check("Esc toglie il campo attivo", v.focus_field is None)
 
+    # --- Stampa: i campi non salvati finiscono nel temporaneo, come le firme ---
+    from piedf.printing import print_source
+    path, temp = print_source(str(src), None, [], {}, forms.changed())
+    printed = widgets(path)
+    check("stampa: temporaneo con i campi non salvati", temp == path and path != str(src)
+          and printed.get("Nome") == "Mario Rossi" and printed.get("Privacy") == "Yes", str(printed.get("Nome")))
+    Path(temp).unlink(missing_ok=True)
+
     # --- 9a. Campo firma: niente editor ---
     click_field(field("Firma"))
     check("9. clic sul campo firma: niente editor", v.editor is None and v.focus_field is None)
