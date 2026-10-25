@@ -16,6 +16,7 @@ class Renderer(QObject):
     """Interfaccia lato GUI verso il processo di render."""
 
     page_ready = Signal(int, int, float, QImage)  # gen, pagina, scala, immagine
+    links_ready = Signal(int, int, list)  # gen, pagina, link (vedi render_worker)
     failed = Signal(int, str)  # gen, messaggio
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -32,6 +33,7 @@ class Renderer(QObject):
 
         self._reader = _ResultReader(self._results, self._on_closed)
         self._reader.page_ready.connect(self.page_ready)
+        self._reader.links_ready.connect(self.links_ready)
         self._reader.failed.connect(self.failed)
         self._reader.start()
 
@@ -88,6 +90,10 @@ class Renderer(QObject):
         else:
             self.failed.emit(gen, "Il motore di rendering si è interrotto su questo documento.")
 
+    def request_links(self, gen: int, page: int) -> None:
+        if self._ensure_alive():
+            self._requests.put(("links", gen, page))
+
     def shutdown(self) -> None:
         self._requests.put(("quit",))
         self._results.put(None)
@@ -101,6 +107,7 @@ class _ResultReader(QThread):
     """Legge i risultati dal processo e li inoltra alla GUI come segnali."""
 
     page_ready = Signal(int, int, float, QImage)
+    links_ready = Signal(int, int, list)
     failed = Signal(int, str)
 
     def __init__(self, results, on_closed) -> None:
@@ -117,6 +124,8 @@ class _ResultReader(QThread):
                 _, gen, page, scale, width, height, stride, samples = msg
                 image = QImage(samples, width, height, stride, QImage.Format.Format_RGB888).copy()
                 self.page_ready.emit(gen, page, scale, image)
+            elif msg[0] == "links":
+                self.links_ready.emit(msg[1], msg[2], msg[3])
             elif msg[0] == "error":
                 self.failed.emit(msg[1], msg[2])
             elif msg[0] == "closed":
