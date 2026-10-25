@@ -1,11 +1,12 @@
 import bisect
 import math
 from collections import OrderedDict
+from dataclasses import dataclass
 from enum import Enum
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QWheelEvent
-from PySide6.QtWidgets import QAbstractScrollArea, QComboBox, QLineEdit, QListWidget, QPlainTextEdit, QWidget
+from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QComboBox, QLineEdit, QListWidget, QPlainTextEdit, QWidget
 
 from piedf.document import COMBO, LIST, TEXT, FormField
 from piedf.forms import FormValues
@@ -37,6 +38,21 @@ CORNER_CURSORS = [
 ]
 
 
+@dataclass(frozen=True, eq=False)
+class PageLink:
+    """Link di una pagina, nello spazio della pagina come si vede (vedi render_worker)."""
+
+    rect: QRectF  # punti PDF
+    kind: str  # "goto" (interno) o "uri" (esterno, la finestra decide se seguirlo)
+    page: int = -1  # destinazione dei link interni
+    y: float | None = None  # punti PDF nella pagina di destinazione; None = in cima
+    uri: str = ""
+
+    @property
+    def tooltip(self) -> str:
+        return f"Vai a pagina {self.page + 1}" if self.kind == "goto" else self.uri
+
+
 class FitMode(Enum):
     NONE = 0
     WIDTH = 1
@@ -49,11 +65,14 @@ class PdfView(QAbstractScrollArea):
     page_changed = Signal(int)  # indice da 0
     zoom_changed = Signal(float, FitMode)
     placing_changed = Signal(bool)  # entrata/uscita dalla modalità posizionamento
+    link_goto = Signal(int, float)  # clic su un link interno: pagina, y in punti
+    link_uri = Signal(str)  # clic su un link esterno, ancora da validare
 
     def __init__(self, renderer: Renderer, parent=None) -> None:
         super().__init__(parent)
         self._renderer = renderer
         renderer.page_ready.connect(self._on_page_ready)
+        renderer.links_ready.connect(self._on_links_ready)
         renderer.field_applied.connect(self._on_field_applied)
 
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
@@ -72,6 +91,8 @@ class PdfView(QAbstractScrollArea):
         self._cache: OrderedDict[int, tuple[float, QImage]] = OrderedDict()
         self._cache_bytes = 0
         self._last_request: list[tuple[int, float]] | None = None
+        self._links: dict[int, list[PageLink]] = {}  # pagine i cui link sono già arrivati
+        self._links_pending: set[int] = set()
 
         self._placements = Placements(self)
         self._placements.changed.connect(self.viewport().update)
@@ -79,6 +100,7 @@ class PdfView(QAbstractScrollArea):
         self._cursor_pos: QPointF | None = None  # ultima posizione del mouse nella vista
         # Trascinamento in corso: (firma, rettangolo iniziale, punto iniziale in punti, angolo o None).
         self._drag: tuple[Placement, QRectF, QPointF, int | None] | None = None
+        self._link_press: tuple[PageLink, QPointF] | None = None  # pressione su un link, non ancora clic
         self.viewport().setMouseTracking(True)
 
         self._forms = FormValues(self._placements.undo_stack, self)
@@ -195,6 +217,17 @@ class PdfView(QAbstractScrollArea):
             rect_pt.height() * s,
         )
 
+    def link_at(self, pos: QPointF | QPoint) -> PageLink | None:
+        """Link sotto il punto della vista (px logici), se i suoi link sono già arrivati."""
+        page = self.page_at(pos)
+        if page is None:
+            return None
+        pt = self.to_page_point(page, pos)
+        for link in self._links.get(page, ()):
+            if link.rect.contains(pt):
+                return link
+        return None
+
     def set_document(self, gen: int, page_sizes: list[tuple[float, float]]) -> None:
         self._reset_interaction()
         self._gen = gen
@@ -213,6 +246,7 @@ class PdfView(QAbstractScrollArea):
     def reload(self) -> None:
         """Richiede di nuovo le pagine mancanti (il processo di render ha riaperto il documento)."""
         self._last_request = None
+        self._links_pending.clear()
         self.viewport().update()
 
     def clear(self) -> None:
@@ -371,6 +405,19 @@ class PdfView(QAbstractScrollArea):
         if items != self._last_request:
             self._last_request = items
             self._renderer.request(self._gen, items)
+        # I link solo per le pagine visibili: servono solo sotto il mouse.
+        for page in visible:
+            if page not in self._links and page not in self._links_pending:
+                self._links_pending.add(page)
+                self._renderer.request_links(self._gen, page)
+
+    def _on_links_ready(self, gen: int, page: int, links: list) -> None:
+        if gen != self._gen or page >= len(self._sizes):
+            return
+        self._links_pending.discard(page)
+        self._links[page] = [_page_link(item, self._sizes) for item in links]
+        if self._drag is None and self._cursor_pos is not None:
+            self._update_cursor()
 
     def _on_page_ready(self, gen: int, page: int, scale: float, image: QImage) -> None:
         if gen != self._gen or page >= len(self._sizes):
@@ -397,11 +444,14 @@ class PdfView(QAbstractScrollArea):
             if key in visible:
                 continue
             self._cache_bytes -= self._cache.pop(key)[1].sizeInBytes()
+            self._links.pop(key, None)  # i link seguono la cache delle immagini
 
     def _clear_cache(self) -> None:
         self._cache.clear()
         self._cache_bytes = 0
         self._last_request = None
+        self._links.clear()
+        self._links_pending.clear()
 
     # --- Eventi -----------------------------------------------------------------------
 
@@ -510,6 +560,7 @@ class PdfView(QAbstractScrollArea):
 
     def _reset_interaction(self) -> None:
         self._drag = None
+        self._link_press = None
         self.cancel_placing()
         self._close_editor(commit=False)
         self._focus_field = None
@@ -582,6 +633,9 @@ class PdfView(QAbstractScrollArea):
         else:
             placement, corner = self._hit(self._cursor_pos) if self._cursor_pos is not None else (None, None)
             field = self._field_at(self._cursor_pos) if corner is None and self._cursor_pos is not None else None
+            link = None
+            if field is None and placement is None and self._cursor_pos is not None and self._links_active():
+                link = self.link_at(self._cursor_pos)
             if corner is not None:
                 viewport.setCursor(CORNER_CURSORS[corner])
             elif field is not None:
@@ -589,8 +643,17 @@ class PdfView(QAbstractScrollArea):
                 viewport.setCursor(Qt.CursorShape.IBeamCursor if text else Qt.CursorShape.PointingHandCursor)
             elif placement is not None:
                 viewport.setCursor(Qt.CursorShape.OpenHandCursor)
+            elif link is not None:
+                viewport.setCursor(Qt.CursorShape.PointingHandCursor)
             else:
                 viewport.unsetCursor()
+            tooltip = link.tooltip if link is not None else ""
+            if viewport.toolTip() != tooltip:
+                viewport.setToolTip(tooltip)
+
+    def _links_active(self) -> bool:
+        """I link rispondono al clic solo se nessuno strumento lo usa; un campo modulo sotto il mouse vince sempre (si controlla prima)."""
+        return self._placing is None and self._drag is None and self._placements.selected is None
 
     def _resized_rect(self, start: QRectF, corner: int, pt: QPointF, page_size: tuple[float, float]) -> QRectF:
         """Ridimensiona da un angolo tenendo fermo quello opposto e le proporzioni."""
@@ -646,6 +709,9 @@ class PdfView(QAbstractScrollArea):
         if self._focus_field is not None:
             self._focus_field = None
             self.viewport().update()
+        # Con una firma selezionata il clic la deseleziona e basta, anche sopra un link.
+        link = self.link_at(pos) if placement is None and self._links_active() else None
+        self._link_press = (link, pos) if link is not None else None
         self._placements.select(placement)
         if placement is not None:
             start = self.to_page_point(placement.page, pos)
@@ -656,6 +722,8 @@ class PdfView(QAbstractScrollArea):
     def mouseMoveEvent(self, event) -> None:
         pos = event.position()
         self._cursor_pos = pos
+        if self._link_press is not None and _moved(self._link_press[1], pos):
+            self._link_press = None  # trascinamento: niente clic sul link
         if self._drag is not None:
             placement, start_rect, start, corner = self._drag
             pt = self.to_page_point(placement.page, pos)
@@ -680,7 +748,18 @@ class PdfView(QAbstractScrollArea):
             # Tutto il trascinamento diventa un solo passo di annulla.
             self._placements.set_rect(placement, start_rect, QRectF(placement.rect), text)
             self._update_cursor()
+        elif self._link_press is not None and event.button() == Qt.MouseButton.LeftButton:
+            link, start = self._link_press
+            self._link_press = None
+            if not _moved(start, event.position()) and self.link_at(event.position()) is link:
+                self._activate(link)
         event.accept()
+
+    def _activate(self, link: PageLink) -> None:
+        if link.kind == "goto":
+            self.link_goto.emit(link.page, link.y or 0.0)
+        else:
+            self.link_uri.emit(link.uri)
 
     def viewportEvent(self, event) -> bool:
         # Il mouse esce dalla vista: l'anteprima del posizionamento sparisce.
@@ -926,3 +1005,18 @@ class PdfView(QAbstractScrollArea):
                 self.setFocus()
                 return True
         return super().eventFilter(obj, event)
+
+
+def _moved(start: QPointF, pos: QPointF) -> bool:
+    return (pos - start).manhattanLength() > QApplication.startDragDistance()
+
+
+def _page_link(item: dict, sizes: list[tuple[float, float]]) -> PageLink:
+    x0, y0, x1, y1 = item["rect"]
+    rect = QRectF(QPointF(x0, y0), QPointF(x1, y1)).normalized()
+    if item["kind"] != "goto":
+        return PageLink(rect, item["kind"], uri=item["uri"])
+    page, y = item["page"], item["to"][1]
+    if y is not None and 0 <= page < len(sizes):
+        y = max(0.0, min(y, sizes[page][1]))
+    return PageLink(rect, "goto", page, y)

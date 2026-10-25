@@ -1,4 +1,4 @@
-"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotati, firmato digitalmente, moduli."""
+"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotati, firmato digitalmente, moduli, link."""
 import random, re, sys
 from pathlib import Path
 import pymupdf
@@ -130,6 +130,59 @@ for i in range(50):
     for j in range(20):
         widget(p, T, f"p{i + 1}_campo{j + 1}", (150, 60 + 38 * j, 450, 80 + 38 * j), field_value=f"Valore {j + 1}")
 d.save(out / "modulo_lungo.pdf")
+
+# Link (#24). I rettangoli sono nello spazio della pagina come si vede; dove c'è un link
+# si disegna un riquadro rosso, così il controllo trova il punto da cliccare nell'immagine.
+def raw_link(page, visible, action):
+    """Link scritto a mano: serve per /Fit, destinazioni con nome, Launch, JavaScript."""
+    r = visible * page.derotation_matrix * page.transformation_matrix  # → coordinate PDF
+    xref = d.get_new_xref()
+    d.update_object(xref, f"<</Type/Annot/Subtype/Link/Rect[{r.x0:g} {r.y0:g} {r.x1:g} {r.y1:g}]/Border[0 0 0]/A{action}>>")
+    kind, annots = d.xref_get_key(page.xref, "Annots")
+    d.xref_set_key(page.xref, "Annots", (annots[:-1] if kind == "array" else "[") + f" {xref} 0 R]")
+
+def box(page, visible, label):
+    page.draw_rect(visible * page.derotation_matrix, color=(1, 0, 0), fill=(1, 0, 0))
+    page.insert_text((visible * page.derotation_matrix).bl + (0, 14), label, fontsize=10, rotate=page.rotation)
+
+d = pymupdf.open()
+for _ in range(6):
+    d.new_page(width=595, height=842)
+pages = [d[i] for i in range(6)]
+pages[1].set_rotation(90)
+pages[3].set_rotation(90)
+for i, p in enumerate(pages):
+    p.insert_text(pymupdf.Point(72, 60) * p.derotation_matrix, f"Pagina {i + 1}", fontsize=24, rotate=p.rotation)
+p0 = pages[0]
+p0.insert_link({"kind": pymupdf.LINK_GOTO, "from": pymupdf.Rect(72, 100, 300, 125), "page": 2, "to": pymupdf.Point(0, 400)})
+box(p0, pymupdf.Rect(72, 100, 300, 125), "interno, pagina 3 a y 400")
+raw_link(p0, pymupdf.Rect(72, 160, 300, 185), f"<</S/GoTo/D[{pages[2].xref} 0 R/Fit]>>")
+box(p0, pymupdf.Rect(72, 160, 300, 185), "interno, pagina 3 senza punto")
+p0.insert_link({"kind": pymupdf.LINK_URI, "from": pymupdf.Rect(72, 220, 300, 245), "uri": "https://example.com/percorso?x=1"})
+box(p0, pymupdf.Rect(72, 220, 300, 245), "https")
+p0.insert_link({"kind": pymupdf.LINK_URI, "from": pymupdf.Rect(72, 280, 300, 305), "uri": "mailto:info@example.com"})
+box(p0, pymupdf.Rect(72, 280, 300, 305), "mailto")
+p0.insert_link({"kind": pymupdf.LINK_URI, "from": pymupdf.Rect(72, 340, 300, 365), "uri": "file:///C:/Windows/System32/calc.exe"})
+box(p0, pymupdf.Rect(72, 340, 300, 365), "file:")
+raw_link(p0, pymupdf.Rect(72, 400, 300, 425), "<</S/Launch/F(calc.exe)>>")
+box(p0, pymupdf.Rect(72, 400, 300, 425), "launch")
+p0.insert_link({"kind": pymupdf.LINK_URI, "from": pymupdf.Rect(72, 460, 300, 485), "uri": "javascript:app.alert(1)"})
+box(p0, pymupdf.Rect(72, 460, 300, 485), "javascript:")
+raw_link(p0, pymupdf.Rect(72, 520, 300, 545), "<</S/GoToR/F(altro.pdf)/D[0/Fit]>>")
+box(p0, pymupdf.Rect(72, 520, 300, 545), "altro PDF")
+# Destinazione su una pagina ruotata: (100, 300) non ruotato è (542, 100) come si vede.
+p0.insert_link({"kind": pymupdf.LINK_GOTO, "from": pymupdf.Rect(320, 100, 540, 125), "page": 3, "to": pymupdf.Point(100, 300)})
+box(p0, pymupdf.Rect(320, 100, 540, 125), "pagina 4 ruotata, y 100")
+raw_link(p0, pymupdf.Rect(320, 160, 540, 185), "<</S/GoTo/D(capitolo)>>")
+box(p0, pymupdf.Rect(320, 160, 540, 185), "con nome, pagina 4 y 200")
+names = d.get_new_xref()
+# XYZ 200 542 = (200, 300) non ruotato dall'alto = (542, 200) come si vede.
+d.update_object(names, f"<</Names[(capitolo)[{pages[3].xref} 0 R/XYZ 200 542 0]]>>")
+d.xref_set_key(d.pdf_catalog(), "Names", f"<</Dests {names} 0 R>>")
+# Link sulla pagina ruotata, nel punto in cui si vede
+raw_link(pages[1], pymupdf.Rect(500, 300, 700, 340), f"<</S/GoTo/D[{p0.xref} 0 R/Fit]>>")
+box(pages[1], pymupdf.Rect(500, 300, 700, 340), "ruotata, verso pagina 1")
+d.save(out / "link.pdf")
 
 data = (out / "lungo_350.pdf").read_bytes()
 (out / "danneggiato.pdf").write_bytes(data[: len(data) // 2])  # troncato a metà: irrecuperabile
