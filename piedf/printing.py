@@ -1,0 +1,274 @@
+"""Stampa (#25): impaginazione sul foglio, opzioni e lavoro di stampa.
+
+Le pagine le disegna un processo di render dedicato (`render_worker.print_pages`), alla
+risoluzione della stampante (massimo 600 dpi). Un thread le riceve e le disegna con
+`QPainter` sul `QPrinter`: Qt permette di dipingere su un QPrinter fuori dal thread della
+GUI, così la compressione delle immagini grandi non blocca l'interfaccia.
+"""
+
+import multiprocessing
+import os
+import queue
+import tempfile
+from dataclasses import dataclass
+
+import pymupdf
+from PySide6.QtCore import QObject, QPointF, QRect, QRectF, QThread, Signal
+from PySide6.QtGui import QImage, QPageLayout, QPainter
+from PySide6.QtPrintSupport import QPrinter
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
+    QGroupBox,
+    QRadioButton,
+    QVBoxLayout,
+)
+
+from piedf import render_worker
+from piedf.writer import save_with_signatures
+
+MAX_DPI = 600
+NO_PRINT_MESSAGE = "L'autore di questo documento non permette la stampa."
+BAND_BYTES = 2 * 2**20  # una striscia di pagina per volta sul QPrinter (vedi _draw)
+PROCESS_EXIT_S = 5.0  # attesa massima perché il processo di stampa esca
+POLL_S = 0.2  # ogni quanto il thread di stampa controlla Annulla mentre aspetta una pagina
+
+
+@dataclass
+class PrintOptions:
+    fit: bool = True  # Adatta alla pagina; False = Dimensione reale
+    auto_rotate: bool = True
+
+
+def can_print(path: str, password: str | None) -> bool:
+    """False se i permessi del documento vietano la stampa."""
+    doc = pymupdf.open(path)
+    try:
+        if doc.needs_pass:
+            doc.authenticate(password or "")
+        return bool(doc.permissions & pymupdf.PDF_PERM_PRINT)
+    finally:
+        doc.close()
+
+
+def print_source(src: str, password: str | None, placements: list, streams: dict) -> tuple[str, str | None]:
+    """File da stampare e temporaneo da cancellare dopo (None se si stampa `src` così com'è).
+
+    Con firme non salvate si scrivono in un temporaneo con lo stesso writer del salvataggio,
+    così si stampa quello che si vede. Solleva `SaveError`.
+    """
+    if not placements:
+        return src, None
+    fd, tmp = tempfile.mkstemp(prefix="piedf-stampa-", suffix=".pdf")
+    os.close(fd)
+    try:
+        save_with_signatures(src, password, placements, tmp, streams)
+    except Exception:
+        remove_quietly(tmp)
+        raise
+    return tmp, tmp
+
+
+def remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def layout(page: tuple[float, float], area: tuple[float, float], options: PrintOptions) -> tuple[bool, float]:
+    """(ruotata di 90°, scala) di una pagina in punti dentro l'area stampabile in punti."""
+    w, h = page
+    aw, ah = area
+    # Orizzontale su un foglio verticale (o il contrario): si ruota invece di rimpicciolire.
+    rotated = options.auto_rotate and w != h and aw != ah and (w > h) != (aw > ah)
+    if rotated:
+        w, h = h, w
+    scale = min(aw / w, ah / h) if options.fit else 1.0
+    return rotated, scale
+
+
+def selected_pages(printer: QPrinter, page_count: int, current: int) -> list[int]:
+    """Pagine (da 0) scelte nel dialog di stampa, nell'ordine in cui si stampano."""
+    Range = QPrinter.PrintRange
+    if printer.printRange() == Range.CurrentPage:
+        return [current]
+    if printer.printRange() != Range.PageRange:
+        return list(range(page_count))
+    ranges = [(r.from_, r.to) for r in printer.pageRanges().toRangeList()]
+    if not ranges and printer.fromPage() > 0:
+        ranges = [(printer.fromPage(), printer.toPage())]
+    pages = []
+    for first, last in ranges:
+        pages += range(max(first, 1) - 1, min(last, page_count))
+    return pages
+
+
+class PrintOptionsDialog(QDialog):
+    """Le opzioni di PieDF, prima del dialog di stampa di Windows (che non si può estendere)."""
+
+    def __init__(self, options: PrintOptions, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Stampa")
+        box = QGroupBox("Dimensione")
+        self._fit = QRadioButton("&Adatta alla pagina")
+        self._actual = QRadioButton("&Dimensione reale")
+        (self._fit if options.fit else self._actual).setChecked(True)
+        size_layout = QVBoxLayout(box)
+        size_layout.addWidget(self._fit)
+        size_layout.addWidget(self._actual)
+        self._rotate = QCheckBox("&Orientamento automatico")
+        self._rotate.setToolTip("Ruota le pagine orizzontali sul foglio verticale invece di rimpicciolirle")
+        self._rotate.setChecked(options.auto_rotate)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Continua…")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Annulla")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout_ = QVBoxLayout(self)
+        layout_.addWidget(box)
+        layout_.addWidget(self._rotate)
+        layout_.addWidget(buttons)
+
+    def options(self) -> PrintOptions:
+        return PrintOptions(fit=self._fit.isChecked(), auto_rotate=self._rotate.isChecked())
+
+
+class PrintJob(QObject):
+    """Una stampa in corso: processo di render dedicato + thread che disegna sul QPrinter."""
+
+    progress = Signal(int, int)  # pagine stampate, totale
+    finished = Signal(bool, str)  # completata; messaggio d'errore ("" se completata o annullata)
+
+    def __init__(
+        self, printer: QPrinter, path: str, password: str | None, pages: list[int],
+        page_sizes: list[tuple[float, float]], options: PrintOptions, temp: str | None = None,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._temp = temp
+        dpi = min(printer.resolution(), MAX_DPI)
+        area = printer.pageLayout().paintRect(QPageLayout.Unit.Point).size()
+        placed = [(p, *layout(page_sizes[p], (area.width(), area.height()), options)) for p in pages]
+        if not printer.supportsMultipleCopies() and printer.copyCount() > 1:
+            placed *= printer.copyCount()  # copie fascicolate fatte qui (es. stampa su PDF)
+        items = [(p, scale * dpi / 72) for p, _, scale in placed]
+
+        ctx = multiprocessing.get_context("spawn")
+        self._acks = ctx.Queue()
+        self._results = ctx.Queue()
+        self._process = ctx.Process(
+            target=render_worker.print_pages,
+            args=(path, password, items, self._acks, self._results), daemon=True,
+        )
+        self._thread = _PrintThread(printer, placed, page_sizes, (area.width(), area.height()), self)
+        self._thread.progress.connect(self.progress)
+        self._thread.finished.connect(self._on_finished)
+
+    @property
+    def total(self) -> int:
+        return len(self._thread.placed)
+
+    def start(self) -> None:
+        self._process.start()
+        self._thread.start()
+
+    def cancel(self) -> None:
+        """Si ferma dopo la pagina in corso; la stampa iniziata viene interrotta (`abort`)."""
+        self._thread.cancelled = True
+
+    def wait(self) -> None:
+        """Aspetta la fine e pulisce subito (all'uscita il segnale `finished` non arriverebbe più)."""
+        self._thread.wait()
+        self._cleanup()
+
+    def _on_finished(self) -> None:
+        self._cleanup()
+        self.finished.emit(self._thread.completed, self._thread.error)
+
+    def _cleanup(self) -> None:
+        if self._process.is_alive():  # annullata o errore: il processo sta ancora disegnando
+            self._process.terminate()
+            self._process.join(PROCESS_EXIT_S)
+        if self._temp is not None:
+            remove_quietly(self._temp)
+            self._temp = None
+
+
+class _PrintThread(QThread):
+    progress = Signal(int, int)
+
+    def __init__(self, printer, placed, page_sizes, area, job: PrintJob) -> None:
+        super().__init__()
+        self.printer = printer
+        self.placed = placed  # [(pagina, ruotata, scala)]
+        self.page_sizes = page_sizes
+        self.area = area
+        self.job = job
+        self.cancelled = False
+        self.completed = False
+        self.error = ""
+
+    def run(self) -> None:
+        printer = self.printer
+        painter = QPainter()
+        if not painter.begin(printer):
+            self.error = "Impossibile avviare la stampa sulla stampante scelta."
+            return
+        painter.scale(printer.resolution() / 72, printer.resolution() / 72)  # da qui in punti
+        total = len(self.placed)
+        try:
+            for n, (page, rotated, scale) in enumerate(self.placed):
+                msg = self._next_page()
+                if msg is None:
+                    break
+                if msg[0] == "error":
+                    self.error = msg[1]
+                    break
+                _, _, width, height, stride, samples = msg
+                image = QImage(samples, width, height, stride, QImage.Format.Format_RGB888)
+                if n:
+                    printer.newPage()
+                self._draw(painter, image, self.page_sizes[page], rotated, scale)
+                del image, samples, msg
+                self.job._acks.put(n)
+                self.progress.emit(n + 1, total)
+            else:
+                self.completed = True
+        finally:
+            if not self.completed:
+                printer.abort()
+            painter.end()
+        if self.completed:
+            # Il processo ha finito e sta uscendo: si aspetta qui, non nel thread della GUI.
+            self.job._process.join(PROCESS_EXIT_S)
+
+    def _next_page(self):
+        """Il prossimo messaggio del processo; None se annullata o se il processo è morto."""
+        while not self.cancelled:
+            try:
+                return self.job._results.get(timeout=POLL_S)
+            except queue.Empty:
+                if not self.job._process.is_alive() and self.job._results.empty():
+                    return ("error", "Il motore di rendering si è interrotto durante la stampa.")
+        return None
+
+    def _draw(self, painter: QPainter, image: QImage, size, rotated: bool, scale: float) -> None:
+        """La pagina centrata nell'area stampabile, ruotata di 90° in senso orario se serve."""
+        w, h = size[0] * scale, size[1] * scale
+        painter.save()
+        painter.translate(QPointF(self.area[0] / 2, self.area[1] / 2))
+        if rotated:
+            painter.rotate(90)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        # A strisce: drawImage tiene il GIL (~0,5 s per un A4 a 600 dpi) e la GUI si bloccherebbe.
+        # Ogni striscia ha una riga in più, coperta dalla successiva: niente fessure bianche.
+        rows = max(1, BAND_BYTES // image.bytesPerLine())
+        k = h / image.height()
+        for top in range(0, image.height(), rows):
+            n = min(rows + 1, image.height() - top)
+            painter.drawImage(QRectF(-w / 2, -h / 2 + top * k, w, n * k), image, QRect(0, top, image.width(), n))
+        painter.restore()

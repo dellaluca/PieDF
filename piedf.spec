@@ -16,12 +16,13 @@ ONEFILE = "--onefile" in sys.argv[1:]
 VERSION = re.search(r'__version__ = "([^"]+)"', (ROOT / "piedf" / "__init__.py").read_text()).group(1)
 NUMBERS = tuple((list(map(int, VERSION.split("."))) + [0, 0, 0, 0])[:4])
 
-# Moduli Qt che PieDF non usa (solo QtCore, QtGui, QtWidgets) e pacchetti Python inutili.
+# Moduli Qt che PieDF non usa (solo QtCore, QtGui, QtWidgets e QtPrintSupport per la stampa)
+# e pacchetti Python inutili.
 EXCLUDES = [
     "PySide6.QtNetwork", "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets",
     "PySide6.QtPdf", "PySide6.QtPdfWidgets", "PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets",
     "PySide6.QtSvg", "PySide6.QtSvgWidgets", "PySide6.QtTest", "PySide6.QtSql",
-    "PySide6.QtPrintSupport", "PySide6.QtDBus", "PySide6.QtConcurrent", "PySide6.QtXml",
+    "PySide6.QtDBus", "PySide6.QtConcurrent", "PySide6.QtXml",
     "PySide6.QtHelp", "PySide6.QtDesigner", "PySide6.QtUiTools",
     "tkinter", "unittest", "pydoc", "numpy", "PIL",
     # Analisi del layout di PyMuPDF (opzionale, con onnxruntime): PieDF non la usa.

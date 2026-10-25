@@ -1,4 +1,4 @@
-"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotati, firmato digitalmente, link."""
+"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotati, firmato digitalmente, link, senza permesso di stampa."""
 import random, re, sys
 from pathlib import Path
 import pymupdf
@@ -22,6 +22,11 @@ d.save(out / "lungo_350.pdf")
 
 d = pymupdf.open(out / "semplice.pdf")
 d.save(out / "cifrato.pdf", encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="pie", owner_pw="owner")
+
+# Si apre senza password ma i permessi vietano la stampa (#25)
+d = pymupdf.open(out / "semplice.pdf")
+d.save(out / "senza_stampa.pdf", encryption=pymupdf.PDF_ENCRYPT_AES_256, owner_pw="owner",
+       permissions=pymupdf.PDF_PERM_ACCESSIBILITY | pymupdf.PDF_PERM_COPY)
 
 # "Scansione": immagine rumorosa grande a pagina intera, 5 pagine
 random.seed(1)
