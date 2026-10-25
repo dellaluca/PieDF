@@ -16,8 +16,8 @@ d = pymupdf.open()
 for i in range(350):
     p = d.new_page(width=595, height=842)
     p.insert_text((72, 72), f"Pagina {i + 1} di 350", fontsize=28)
-    for j in range(40):  # "Riga 7:" una volta per pagina (ricerca, #14)
-        p.insert_text((72, 120 + j * 17), f"Riga {j + 1}: " + "lorem ipsum dolor sit amet " * 2, fontsize=9)
+    for j in range(40):
+        p.insert_text((72, 120 + j * 17), f"Riga {j + 1}: lorem ipsum dolor sit amet " * 2, fontsize=9)
 d.save(out / "lungo_350.pdf")
 
 d = pymupdf.open(out / "semplice.pdf")

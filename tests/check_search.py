@@ -119,16 +119,20 @@ def main():
 
     # --- 2. Molti risultati, F3 / Maiusc+F3 ----------------------------------------------
     v.go_to_page(0); wait_rendered()
+    # Ogni riga è "Riga N: lorem ipsum dolor sit amet " ripetuto due volte: 2 risultati per pagina.
     dt = search("Riga 7:")
-    check("'Riga 7:': 350 risultati, uno per pagina", len(bar.hits) == 350 and len({p for p, _ in bar.hits}) == 350,
+    check("'Riga 7:': 700 risultati, 2 per pagina su tutte le 350", len(bar.hits) == 700 and len({p for p, _ in bar.hits}) == 350,
           f"{len(bar.hits)} in {dt and round(dt, 2)}s «{label()}»")
-    check("salto al primo risultato dalla pagina corrente", bar.current_index == 0 and label() == "1 di 350", label())
+    check("salto al primo risultato dalla pagina corrente", bar.current_index == 0 and label() == "1 di 700", label())
+    by_page = [p for p, _ in bar.hits[:4]]
+    check("ordine: pagina, poi da sinistra a destra", by_page == [0, 0, 1, 1] and bar.hits[0][1].left() < bar.hits[1][1].left(),
+          str(by_page))
     for _ in range(10):
         key(Qt.Key.Key_F3, NO, field)
-    check("F3 dieci volte: risultato 11", bar.current_index == 10 and label() == "11 di 350" and v.current_page == 10,
+    check("F3 dieci volte: risultato 11", bar.current_index == 10 and label() == "11 di 700" and v.current_page == 5,
           f"«{label()}» pagina {v.current_page + 1}")
     key(Qt.Key.Key_F3, SHIFT, field)
-    check("Maiusc+F3: risultato 10", bar.current_index == 9 and label() == "10 di 350", label())
+    check("Maiusc+F3: risultato 10", bar.current_index == 9 and label() == "10 di 700", label())
     key(Qt.Key.Key_Return, NO, field)
     check("Invio: successivo", bar.current_index == 10, label())
     key(Qt.Key.Key_Return, SHIFT, field)
@@ -139,7 +143,7 @@ def main():
     bar.previous(); bar.previous()
     for _ in range(9):
         bar.previous()
-    check("◀ dal primo va all'ultimo", bar.current_index == 349 and v.current_page == 349, label())
+    check("◀ dal primo va all'ultimo", bar.current_index == 699 and v.current_page == 349, label())
 
     # --- 3. GUI reattiva e render durante la ricerca -------------------------------------
     v.go_to_page(0); wait_rendered()
@@ -180,14 +184,14 @@ def main():
 
     # --- 5. Maiuscole/minuscole ---------------------------------------------------------
     search("riga 7:")
-    check("'riga 7:' senza Maiuscole: 350", len(bar.hits) == 350, label())
+    check("'riga 7:' senza Maiuscole: 700", len(bar.hits) == 700, label())
     search("riga 7:", case=True)
     check("'riga 7:' con Maiuscole: 0 e bordo rosso", not bar.hits and label() == NO_RESULTS and "#d93025" in field.styleSheet(),
           f"«{label()}»")
     search("Riga 7:", case=True)
-    check("'Riga 7:' con Maiuscole: 350", len(bar.hits) == 350, label())
+    check("'Riga 7:' con Maiuscole: 700", len(bar.hits) == 700, label())
     search("Riga 7: lorem", case=True)
-    check("Maiuscole: anche testo con spazi", len(bar.hits) == 350, label())
+    check("Maiuscole: anche testo con spazi", len(bar.hits) == 700, label())
     search("xyzzy")
     check("nessun risultato: messaggio e bordo rosso", label() == NO_RESULTS and "#d93025" in field.styleSheet(), label())
     search("Pagina 2 di")
