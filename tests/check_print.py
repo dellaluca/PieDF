@@ -116,6 +116,20 @@ def main():
         doc.close()
         return info
 
+    def raster(path, page):
+        """(larghezza, altezza, RGB) della pagina stampata, rimettendo insieme le strisce."""
+        doc = pymupdf.open(path)
+        bands = sorted(doc[page].get_image_info(xrefs=True), key=lambda b: b["bbox"][1])
+        rows, width = [], 0
+        for k, b in enumerate(bands):
+            pix = pymupdf.Pixmap(doc, b["xref"])
+            width = pix.width
+            keep = pix.height if k == len(bands) - 1 else pix.height - 1  # la riga in più
+            rows.append(pix.samples[:keep * pix.stride])
+        doc.close()
+        data = b"".join(rows)
+        return width, len(data) // (3 * width), data
+
     def mapped(bbox, rect, page_w):
         """Rettangolo in punti della pagina originale → punti del foglio (pagina non ruotata)."""
         s = bbox.width / page_w
@@ -155,6 +169,19 @@ def main():
     blank = mapped(bbox, pymupdf.Rect(72, 300, 330, 330), 595)
     check("1. bianco fuori dal testo", count(out, 0, blank, dark) == 0)
     check("1. adatta: occupa l'area stampabile", abs(bbox.width - 575) < 2 or abs(bbox.height - 822) < 2, str(bbox))
+    # Stessa risoluzione del render della pagina e nessuna perdita visibile (#34). Il motore PDF
+    # di Qt salva le strisce in JPEG: qualche artefatto sui bordi del testo, non di più.
+    width, height, data = raster(out, 0)
+    src_doc = pymupdf.open(PDFS / "semplice.pdf")
+    s = width / src_doc[0].rect.width
+    ref = src_doc[0].get_pixmap(matrix=pymupdf.Matrix(s, s), alpha=False)
+    src_doc.close()
+    sample = range(0, min(len(data), len(ref.samples)), 7)
+    err = sum(abs(data[i] - ref.samples[i]) for i in sample) / len(sample)
+    far = sum(1 for i in sample if abs(data[i] - ref.samples[i]) > 32) / len(sample)
+    check("1. risoluzione del render, nessuna perdita visibile",
+          (width, height) == (ref.width, ref.height) and err < 0.5 and far < 0.001,
+          f"{width}x{height}, errore medio {err:.2f}, {far * 100:.3f}% oltre 32")
     check("1. avanzamento chiuso", not [d for d in w.findChildren(QProgressDialog) if d.isVisible()])
     check("1. scelte salvate", w._settings.value("print/fit", type=bool) is True
           and w._settings.value("print/auto_rotate", type=bool) is True)
@@ -272,9 +299,22 @@ def main():
             if dlg.isVisible():
                 labels.add(dlg.labelText())
 
+    def blame(gap_list):
+        """Il passo della stampa (printing._PrintThread.steps) che copre di più la pausa più lunga."""
+        if not gap_list:
+            return "nessuna pausa"
+        a, b = max(gap_list, key=lambda g: g[1] - g[0])
+        cover = {}
+        for name, s, e in steps:
+            if min(b, e) > max(a, s) and name != "render":  # il render è in un altro processo
+                cover[name] = cover.get(name, 0) + min(b, e) - max(a, s)
+        name = max(cover, key=cover.get, default="nessun passo")
+        return f"{(b - a) * 1000:.0f} ms, durante: {name} ({cover.get(name, 0) * 1000:.0f} ms)"
+
     t0 = time.perf_counter()
     timer.start()
     w.print_document()
+    steps = w._print_job._thread.steps
     page_times = {}
     w._print_job.progress.connect(lambda n, total: page_times.setdefault(n, time.perf_counter()))
     done = wait_print(limit=400, on_pump=sample)
@@ -283,12 +323,18 @@ def main():
     # Fino alla penultima pagina: alla fine QPdfEngine (la "stampante" PDF del test) chiude il
     # file in painter.end() tenendo il GIL; con una stampante vera end() è EndDoc di Windows.
     until = page_times.get(49, time.perf_counter())
-    gaps = [b - a for a, b in zip(ticks, ticks[1:]) if b <= until]
-    end_gaps = [b - a for a, b in zip(ticks, ticks[1:]) if b > until]
+    spans = [(a, b) for a, b in zip(ticks, ticks[1:]) if b <= until]
+    end_spans = [(a, b) for a, b in zip(ticks, ticks[1:]) if b > until]
+    gaps = [b - a for a, b in spans]
     check("6. 50 pagine stampate", done and len(images(out)) == 50, f"{secs:.1f} s")
-    check("6. pausa massima della GUI < 150 ms", gaps and max(gaps) < 0.150, f"{max(gaps) * 1000:.0f} ms")
-    print(f"INFO pausa massima dopo la pagina 49 (ultima pagina e chiusura del PDF): "
-          f"{max(end_gaps, default=0) * 1000:.0f} ms", flush=True)
+    check("6. pausa massima della GUI < 150 ms", gaps and max(gaps) < 0.150, blame(spans))
+    print(f"INFO pausa massima dopo la pagina 49 (ultima pagina e chiusura del PDF): {blame(end_spans)}", flush=True)
+    longest = {}
+    for name, s, e in steps:
+        if name != "ricezione":  # è soprattutto attesa del render, senza GIL
+            longest[name] = max(longest.get(name, 0), e - s)
+    print("INFO passo più lungo: " + ", ".join(f"{name} {sec * 1000:.0f} ms" for name, sec in
+                                               sorted(longest.items(), key=lambda x: -x[1])), flush=True)
     check("6. avanzamento «Stampa pagina N di 50…»", "Stampa pagina 12 di 50…" in labels, f"{len(labels)} testi")
     if proc:
         grow = (peak[0] - base) / 2**20
@@ -320,6 +366,7 @@ def main():
           f"annullata a {stopped}, ultima {last[-1:]}")
     check("6. nessun temporaneo", tmp_files() == [], str(tmp_files()))
     check("6. processo di stampa chiuso", not job._process.is_alive())
+    check("6. memoria condivisa liberata", job._slots == [])
     check("6. nessun errore", not errors, str(errors))
     w.placements.clear()
 
