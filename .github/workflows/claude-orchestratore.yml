@@ -86,7 +86,17 @@ jobs:
               for l in needs-info claude:errore claude:fatto claude:haiku claude:sonnet claude:opus; do togli "$l"; done
               gh issue edit "$NUMERO" --add-label "claude:in-corso,claude:$modello"
               gh issue comment "$NUMERO" --body-file messaggio.md
-              gh workflow run claude-esecutore.yml --ref main -f numero="$NUMERO" -f modello="$modello"
+              # Se per questa issue c'è già una PR aperta (anche una bozza del salvataggio
+              # automatico), l'esecutore continua lì invece di ripartire da main.
+              destinazione="$NUMERO"
+              if ! gh pr view "$NUMERO" --json number >/dev/null 2>&1; then
+                pr=$(gh pr list --state open --json number,body --jq "[.[] | select(.body | test(\"(?i)closes #$NUMERO([^0-9]|\$)\"))][0].number // empty")
+                if [ -n "$pr" ]; then
+                  destinazione="$pr"
+                  gh pr comment "$pr" --body "Riprendo il lavoro di #$NUMERO su questa PR invece di ripartire da \`main\`: completa quello che manca (vedi il ticket e l'ultimo commento dell'orchestratore), poi rilancia tutti i controlli."
+                fi
+              fi
+              gh workflow run claude-esecutore.yml --ref main -f numero="$destinazione" -f modello="$modello"
               ;;
             ignora)
               gh issue edit "$NUMERO" --add-label claude:skip

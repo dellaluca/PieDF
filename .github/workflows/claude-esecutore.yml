@@ -31,7 +31,7 @@ concurrency:
 jobs:
   esegui:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90  # i ticket grandi con Opus superano l'ora (#14)
     env:
       NUMERO: ${{ inputs.numero }}
       GH_TOKEN: ${{ github.token }}
