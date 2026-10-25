@@ -272,9 +272,22 @@ def main():
             if dlg.isVisible():
                 labels.add(dlg.labelText())
 
+    def blame(gap_list):
+        """Il passo della stampa (printing._PrintThread.steps) che copre di più la pausa più lunga."""
+        if not gap_list:
+            return "nessuna pausa"
+        a, b = max(gap_list, key=lambda g: g[1] - g[0])
+        cover = {}
+        for name, s, e in steps:
+            if min(b, e) > max(a, s) and name != "render":  # il render è in un altro processo
+                cover[name] = cover.get(name, 0) + min(b, e) - max(a, s)
+        name = max(cover, key=cover.get, default="nessun passo")
+        return f"{(b - a) * 1000:.0f} ms, durante: {name} ({cover.get(name, 0) * 1000:.0f} ms)"
+
     t0 = time.perf_counter()
     timer.start()
     w.print_document()
+    steps = w._print_job._thread.steps
     page_times = {}
     w._print_job.progress.connect(lambda n, total: page_times.setdefault(n, time.perf_counter()))
     done = wait_print(limit=400, on_pump=sample)
@@ -283,12 +296,18 @@ def main():
     # Fino alla penultima pagina: alla fine QPdfEngine (la "stampante" PDF del test) chiude il
     # file in painter.end() tenendo il GIL; con una stampante vera end() è EndDoc di Windows.
     until = page_times.get(49, time.perf_counter())
-    gaps = [b - a for a, b in zip(ticks, ticks[1:]) if b <= until]
-    end_gaps = [b - a for a, b in zip(ticks, ticks[1:]) if b > until]
+    spans = [(a, b) for a, b in zip(ticks, ticks[1:]) if b <= until]
+    end_spans = [(a, b) for a, b in zip(ticks, ticks[1:]) if b > until]
+    gaps = [b - a for a, b in spans]
     check("6. 50 pagine stampate", done and len(images(out)) == 50, f"{secs:.1f} s")
-    check("6. pausa massima della GUI < 150 ms", gaps and max(gaps) < 0.150, f"{max(gaps) * 1000:.0f} ms")
-    print(f"INFO pausa massima dopo la pagina 49 (ultima pagina e chiusura del PDF): "
-          f"{max(end_gaps, default=0) * 1000:.0f} ms", flush=True)
+    check("6. pausa massima della GUI < 150 ms", gaps and max(gaps) < 0.150, blame(spans))
+    print(f"INFO pausa massima dopo la pagina 49 (ultima pagina e chiusura del PDF): {blame(end_spans)}", flush=True)
+    longest = {}
+    for name, s, e in steps:
+        if name != "ricezione":  # è soprattutto attesa del render, senza GIL
+            longest[name] = max(longest.get(name, 0), e - s)
+    print("INFO passo più lungo: " + ", ".join(f"{name} {sec * 1000:.0f} ms" for name, sec in
+                                               sorted(longest.items(), key=lambda x: -x[1])), flush=True)
     check("6. avanzamento «Stampa pagina N di 50…»", "Stampa pagina 12 di 50…" in labels, f"{len(labels)} testi")
     if proc:
         grow = (peak[0] - base) / 2**20

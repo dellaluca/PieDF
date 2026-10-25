@@ -95,19 +95,44 @@ def run(requests, results) -> None:
 
 
 # Pagine per la stampa già pronte e non ancora confermate dalla GUI: a 600 dpi un A4 occupa
-# circa 100 MB, quindi non si va avanti più di così.
+# circa 100 MB, quindi non si va avanti più di così. È anche il numero di slot di memoria condivisa.
 PRINT_AHEAD = 2
 
 
-def print_pages(path, password, items, acks, results) -> None:
+def _lower_priority() -> None:
+    """Priorità sotto il normale: con pochi core il thread che disegna sul QPrinter, che tiene
+    il GIL, non deve aspettare il processo di render per tornare in esecuzione (#34)."""
+    import os
+    import sys
+
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x4000)  # BELOW_NORMAL_PRIORITY_CLASS
+        else:
+            os.nice(5)
+    except (OSError, AttributeError):
+        pass
+
+
+def print_pages(path, password, items, slots, acks, results) -> None:
     """Processo di stampa: disegna `items` [(pagina, scala), ...] in ordine, uno alla volta.
 
-    Messaggi in uscita: ("page", n, width, height, stride, samples_rgb) per l'n-esimo elemento,
-    ("error", messaggio). Ogni pagina disegnata dalla GUI arriva confermata su `acks`.
-    Per annullare la GUI chiude il processo.
+    I pixel RGB dell'n-esimo elemento vanno nella memoria condivisa `slots[n % PRINT_AHEAD]`
+    (nomi di `SharedMemory` creati dalla GUI): passare ~100 MB per pagina nella coda teneva
+    il GIL della GUI per decine di millisecondi (#34). Messaggi in uscita:
+    ("page", n, width, height, stride, secondi_di_render), ("error", messaggio).
+    Ogni pagina disegnata dalla GUI arriva confermata su `acks`: solo allora il suo slot
+    si riusa. Per annullare la GUI chiude il processo.
     """
+    import time
+    from multiprocessing import shared_memory
+
     import pymupdf
 
+    _lower_priority()
     try:
         doc = pymupdf.open(path)
         if doc.needs_pass and not doc.authenticate(password or ""):
@@ -115,18 +140,27 @@ def print_pages(path, password, items, acks, results) -> None:
     except Exception as e:
         results.put(("error", str(e)))
         return
+    shms = [shared_memory.SharedMemory(name) for name in slots]
     acked = 0
     for n, (page, scale) in enumerate(items):
         while n - acked >= PRINT_AHEAD:
             acks.get()
             acked += 1
+        t = time.perf_counter()
         try:
             pix = doc[page].get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
+            buf = shms[n % PRINT_AHEAD].buf
+            size = pix.stride * pix.height
+            if size > len(buf):
+                raise ValueError("pagina più grande del previsto")
+            buf[:size] = pix.samples_mv
         except Exception as e:
             results.put(("error", f"Pagina {page + 1}: {e}"))
             return
-        results.put(("page", n, pix.width, pix.height, pix.stride, pix.samples))
-        del pix
+        results.put(("page", n, pix.width, pix.height, pix.stride, time.perf_counter() - t))
+        del pix, buf
+    for shm in shms:
+        shm.close()
     doc.close()
 
 

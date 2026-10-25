@@ -3,14 +3,18 @@
 Le pagine le disegna un processo di render dedicato (`render_worker.print_pages`), alla
 risoluzione della stampante (massimo 600 dpi). Un thread le riceve e le disegna con
 `QPainter` sul `QPrinter`: Qt permette di dipingere su un QPrinter fuori dal thread della
-GUI, così la compressione delle immagini grandi non blocca l'interfaccia.
+GUI, così la compressione delle immagini grandi non blocca l'interfaccia. I pixel passano
+per la memoria condivisa (`PRINT_AHEAD` slot creati qui), non per la coda (#34).
 """
 
+import math
 import multiprocessing
 import os
 import queue
 import tempfile
+import time
 from dataclasses import dataclass
+from multiprocessing import shared_memory
 
 import pymupdf
 from PySide6.QtCore import QObject, QPointF, QRect, QRectF, QThread, Signal
@@ -30,7 +34,7 @@ from piedf.writer import save_with_signatures
 
 MAX_DPI = 600
 NO_PRINT_MESSAGE = "L'autore di questo documento non permette la stampa."
-BAND_BYTES = 2 * 2**20  # una striscia di pagina per volta sul QPrinter (vedi _draw)
+BAND_BYTES = 2**19  # una striscia di pagina per volta sul QPrinter (vedi _draw): ~10 ms con il GIL
 PROCESS_EXIT_S = 5.0  # attesa massima perché il processo di stampa esca
 POLL_S = 0.2  # ogni quanto il thread di stampa controlla Annulla mentre aspetta una pagina
 
@@ -158,13 +162,16 @@ class PrintJob(QObject):
         if not printer.supportsMultipleCopies() and printer.copyCount() > 1:
             placed *= printer.copyCount()  # copie fascicolate fatte qui (es. stampa su PDF)
         items = [(p, scale * dpi / 72) for p, _, scale in placed]
+        # RGB della pagina più grande, con un pixel di margine per lato per gli arrotondamenti.
+        size = max((math.ceil(page_sizes[p][0] * s) + 1) * 3 * (math.ceil(page_sizes[p][1] * s) + 1) for p, s in items)
+        self._slots = [shared_memory.SharedMemory(create=True, size=size) for _ in range(render_worker.PRINT_AHEAD)]
 
         ctx = multiprocessing.get_context("spawn")
         self._acks = ctx.Queue()
         self._results = ctx.Queue()
         self._process = ctx.Process(
             target=render_worker.print_pages,
-            args=(path, password, items, self._acks, self._results), daemon=True,
+            args=(path, password, items, [shm.name for shm in self._slots], self._acks, self._results), daemon=True,
         )
         self._thread = _PrintThread(printer, placed, page_sizes, (area.width(), area.height()), self)
         self._thread.progress.connect(self.progress)
@@ -195,6 +202,13 @@ class PrintJob(QObject):
         if self._process.is_alive():  # annullata o errore: il processo sta ancora disegnando
             self._process.terminate()
             self._process.join(PROCESS_EXIT_S)
+        for shm in self._slots:
+            try:
+                shm.close()
+                shm.unlink()
+            except (BufferError, OSError):
+                pass
+        self._slots = []
         if self._temp is not None:
             remove_quietly(self._temp)
             self._temp = None
@@ -213,6 +227,12 @@ class _PrintThread(QThread):
         self.cancelled = False
         self.completed = False
         self.error = ""
+        # [(passo, inizio, fine)] in secondi di perf_counter: per capire dai controlli quale
+        # passo tiene il GIL e blocca la GUI ("render" è nel processo di stampa, senza GIL).
+        self.steps: list[tuple[str, float, float]] = []
+
+    def _step(self, name: str, start: float) -> None:
+        self.steps.append((name, start, time.perf_counter()))
 
     def run(self) -> None:
         printer = self.printer
@@ -224,18 +244,27 @@ class _PrintThread(QThread):
         total = len(self.placed)
         try:
             for n, (page, rotated, scale) in enumerate(self.placed):
+                t = time.perf_counter()
                 msg = self._next_page()
+                self._step("ricezione", t)
                 if msg is None:
                     break
                 if msg[0] == "error":
                     self.error = msg[1]
                     break
-                _, _, width, height, stride, samples = msg
-                image = QImage(samples, width, height, stride, QImage.Format.Format_RGB888)
+                _, _, width, height, stride, render_s = msg
+                self.steps.append(("render", t - render_s, t))  # circa: prima della richiesta
+                t = time.perf_counter()
+                pixels = self.job._slots[n % render_worker.PRINT_AHEAD].buf[:stride * height]
+                image = QImage(pixels, width, height, stride, QImage.Format.Format_RGB888)
+                self._step("immagine", t)
                 if n:
+                    t = time.perf_counter()
                     printer.newPage()
+                    self._step("newPage", t)
                 self._draw(painter, image, self.page_sizes[page], rotated, scale)
-                del image, samples, msg
+                del image  # prima di liberare lo slot: il processo ci scrive la pagina dopo
+                pixels.release()
                 self.job._acks.put(n)
                 self.progress.emit(n + 1, total)
             else:
@@ -243,7 +272,9 @@ class _PrintThread(QThread):
         finally:
             if not self.completed:
                 printer.abort()
+            t = time.perf_counter()
             painter.end()
+            self._step("end", t)
         if self.completed:
             # Il processo ha finito e sta uscendo: si aspetta qui, non nel thread della GUI.
             self.job._process.join(PROCESS_EXIT_S)
@@ -272,5 +303,8 @@ class _PrintThread(QThread):
         k = h / image.height()
         for top in range(0, image.height(), rows):
             n = min(rows + 1, image.height() - top)
+            t = time.perf_counter()
             painter.drawImage(QRectF(-w / 2, -h / 2 + top * k, w, n * k), image, QRect(0, top, image.width(), n))
+            self._step("disegno", t)
+            time.sleep(0)  # lascia il GIL alla GUI se lo sta aspettando
         painter.restore()
