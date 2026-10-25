@@ -47,7 +47,7 @@ Lettore PDF desktop leggero e portatile con firma visiva stile Acrobat "Firma".
 - `piedf/assets/` – icona e risorse incluse nell'exe
 - `piedf.spec` – spec di PyInstaller (onedir; `-- --onefile` per il confronto), esclusioni, icona, informazioni di versione
 - `tools/build_exe.py` – lancia PyInstaller, crea lo zip e stampa le dimensioni; `requirements-build.txt` – solo per costruire (PyInstaller)
-- `tests/` – `make_test_pdfs.py` genera PDF di prova in `tests/out/` (ignorata da git); `check_<area>.py` sono i controlli end-to-end offscreen (`check_viewer.py`, `check_signatures.py`, …): uscita 1 se qualcosa fallisce, i controlli solo-Windows si saltano altrove (`check_exe.py` richiede anche la build in `dist/`)
+- `tests/` – `make_test_pdfs.py` genera PDF di prova in `tests/out/` (ignorata da git); `check_<area>.py` sono i controlli end-to-end offscreen (`check_viewer.py`, `check_signatures.py`, …): uscita 1 se qualcosa fallisce, i controlli solo-Windows si saltano altrove (`check_exe.py` richiede anche la build in `dist/`); `run_all.py` genera i PDF ed esegue tutti i controlli (o solo quelli nominati: `python tests/run_all.py pages forms`)
 - `.github/claude/` – istruzioni di orchestratore ed esecutore; `.github/workflows/` – worker e build (li modifica solo la sessione locale)
 - `docs/automazione.md` – come funzionano e si configurano i worker
 - `docs/firma-codice.md` – firma delle release con SignPath: cosa fa `release.yml`, configurazione una tantum
