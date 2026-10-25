@@ -1,6 +1,6 @@
 # PieDF
 
-Lettore PDF leggero e portatile per Windows, con firma visiva dei documenti (come "Firma" di Acrobat). Gratuito per uso personale.
+Lettore PDF leggero e portatile per Windows, con firma visiva dei documenti (come "Firma" di Acrobat). Software libero, licenza [AGPL-3.0](LICENSE).
 
 ## Scaricare e usare
 
@@ -64,7 +64,18 @@ Lo sviluppo procede a ticket: vedi le [issue](https://github.com/dellaluca/PieDF
 
 ## Licenza
 
-PieDF usa [PyMuPDF](https://pymupdf.readthedocs.io/), rilasciato sotto AGPL-3.0.
+PieDF è software libero: puoi usarlo, studiarlo, modificarlo e ridistribuirlo secondo la [GNU Affero General Public License v3.0](LICENSE). Chi distribuisce una versione modificata deve renderne disponibile il codice sorgente con la stessa licenza.
+
+PieDF usa [PyMuPDF](https://pymupdf.readthedocs.io/) (AGPL-3.0, Artifex) e [Qt for Python / PySide6](https://doc.qt.io/qtforpython-6/) (LGPL-3.0).
+
+## Firma del codice
+
+Gli exe delle Release sono firmati con la firma gratuita per progetti open source: free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/). Si firma solo quello che il workflow "Release" costruisce dal codice di questo repo. Dettagli e configurazione: [docs/firma-codice.md](docs/firma-codice.md).
+
+- Autori e revisori (committer e approver): [@dellaluca](https://github.com/dellaluca). Le modifiche proposte dagli assistenti automatici del repo diventano PR che vengono riviste prima del merge.
+- Chi approva le firme: [@dellaluca](https://github.com/dellaluca).
+
+**Privacy**: PieDF non invia dati in rete. L'unico collegamento verso l'esterno è l'apertura nel browser di un link contenuto in un PDF, solo dopo aver cliccato il link e confermato l'indirizzo.
 
 ## Pubblicare una versione
 

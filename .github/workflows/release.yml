@@ -12,6 +12,8 @@ on:
 
 permissions:
   contents: write
+  # SignPath legge l'artifact da firmare e verifica da quale run arriva.
+  actions: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -20,11 +22,12 @@ concurrency:
 jobs:
   release:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60  # c'è anche l'attesa dell'approvazione su SignPath (fino a 30 min)
     env:
       PYTHONIOENCODING: utf-8
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.ref_name }}
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
     defaults:
       run:
         shell: bash
@@ -53,6 +56,47 @@ jobs:
       - name: Controlla l'exe
         run: |
           python tests/make_test_pdfs.py
+          timeout 300 python -u tests/check_exe.py
+
+      # Firma con SignPath (docs/firma-codice.md): si attiva solo quando c'è il secret
+      # SIGNPATH_API_TOKEN, altrimenti la release esce non firmata come prima.
+      # Si firma solo PieDF.exe, che è anche il processo di render.
+      - name: Carica l'exe da firmare
+        id: da-firmare
+        if: env.SIGNPATH_API_TOKEN != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: PieDF-exe-da-firmare
+          path: dist/PieDF/PieDF.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Firma con SignPath
+        if: env.SIGNPATH_API_TOKEN != ''
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'PieDF' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY || 'release-signing' }}
+          github-artifact-id: ${{ steps.da-firmare.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 1800
+          output-artifact-directory: dist/firmato
+
+      - name: Rifai lo zip con l'exe firmato
+        if: env.SIGNPATH_API_TOKEN != ''
+        run: |
+          cp dist/firmato/PieDF.exe dist/PieDF/PieDF.exe
+          stato=$(powershell -NoProfile -Command "(Get-AuthenticodeSignature 'dist/PieDF/PieDF.exe').Status")
+          echo "Firma di PieDF.exe: $stato"
+          if [ "$(echo "$stato" | tr -d '\r')" != "Valid" ]; then
+            echo "::error::La firma di PieDF.exe non è valida ($stato)"
+            exit 1
+          fi
+          zip=$(ls dist/PieDF-*-win64.zip)
+          python -c "import sys; sys.path.insert(0, 'tools'); import build_exe; from pathlib import Path; build_exe.make_zip(Path('dist/PieDF'), Path(sys.argv[1]))" "$zip"
+          # L'exe firmato deve funzionare come quello appena provato.
           timeout 300 python -u tests/check_exe.py
 
       - name: Pubblica la release
