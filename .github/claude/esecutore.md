@@ -21,6 +21,11 @@ Esegui un ticket di PieDF che l'orchestratore ha già valutato. Il risultato è 
 
 L'ambiente ha già Python 3.12, le dipendenze di `requirements.txt` e Qt in modalità offscreen (`QT_QPA_PLATFORM=offscreen`).
 
+**Come lanciare i comandi** (sei in una sessione non interattiva: quando smetti di chiamare strumenti la sessione finisce e il lavoro non committato resta a metà):
+- `QT_QPA_PLATFORM` è già impostata: **non** mettere variabili davanti ai comandi (`VAR=x python …`, `export …`): sono bloccati dai permessi. Lancia direttamente `python …`, `timeout 600 python -u …`.
+- Lancia tutto **in primo piano** e aspetta il risultato nello stesso comando. Niente `run_in_background`, `&`, `Monitor` o "aspetto che finisca": non c'è nessuno che ti risveglia.
+- Committa spesso (dopo ogni passo che funziona) e fai `git push` del branch appena hai il primo commit: se la sessione si interrompe, il lavoro resta.
+
 1. Genera i PDF di prova: `python tests/make_test_pdfs.py` (finiscono in `tests/out/`, ignorata da git). Se il ticket ha bisogno di PDF di prova nuovi, aggiungili lì.
 2. Ogni ticket aggiunge o estende un controllo `tests/check_<area>.py` con lo stesso stile di quelli esistenti (funzione `check(nome, ok, info)`, riepilogo `N/M ok`, uscita 1 se qualcosa fallisce). I criteri di accettazione del ticket devono diventare controlli.
 3. Prima della PR esegui **tutti** i `tests/check_*.py` (`timeout 600 python -u tests/check_xxx.py`) e correggi quello che fallisce.
