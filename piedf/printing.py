@@ -52,18 +52,20 @@ def can_print(path: str, password: str | None) -> bool:
         doc.close()
 
 
-def print_source(src: str, password: str | None, placements: list, streams: dict) -> tuple[str, str | None]:
+def print_source(
+    src: str, password: str | None, placements: list, streams: dict, fields: list = (),
+) -> tuple[str, str | None]:
     """File da stampare e temporaneo da cancellare dopo (None se si stampa `src` così com'è).
 
-    Con firme non salvate si scrivono in un temporaneo con lo stesso writer del salvataggio,
-    così si stampa quello che si vede. Solleva `SaveError`.
+    Con firme o campi modulo non salvati si scrivono in un temporaneo con lo stesso writer
+    del salvataggio, così si stampa quello che si vede. Solleva `SaveError`.
     """
-    if not placements:
+    if not placements and not fields:
         return src, None
     fd, tmp = tempfile.mkstemp(prefix="piedf-stampa-", suffix=".pdf")
     os.close(fd)
     try:
-        save_with_signatures(src, password, placements, tmp, streams)
+        save_with_signatures(src, password, placements, tmp, streams, fields)
     except Exception:
         remove_quietly(tmp)
         raise

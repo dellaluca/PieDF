@@ -23,6 +23,7 @@ EXE = DIST / "PieDF" / "PieDF.exe"
 ONEFILE = DIST / "PieDF.exe"
 WINDOW_TIMEOUT = 15.0
 EXIT_TIMEOUT = 10.0
+SETTINGS_TIMEOUT = 5.0
 MAX_ZIP_MB = 70
 
 
@@ -161,7 +162,9 @@ def main():
             proc, win, secs = run(ro / "PieDF" / "PieDF.exe", pdf, env)
             check("non scrivibile: la finestra si apre", win is not None, f"{secs:.1f} s")
             check("non scrivibile: niente data/ accanto all'exe", not (ro / "PieDF" / "data").exists())
-            check("non scrivibile: settings.ini in %APPDATA%\\PieDF", (appdata / "PieDF" / "settings.ini").exists())
+            # La finestra compare prima che il file sia aperto: settings.ini arriva subito dopo.
+            ini = appdata / "PieDF" / "settings.ini"
+            check("non scrivibile: settings.ini in %APPDATA%\\PieDF", wait_for(ini.exists, SETTINGS_TIMEOUT), str(ini))
             check("non scrivibile: alla chiusura non resta nessun processo", stop(proc, win), str(pids()))
     finally:
         subprocess.run(["icacls", str(ro), "/remove:d", user, "/T", "/C", "/Q"], capture_output=True)

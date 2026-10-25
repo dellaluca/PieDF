@@ -1,4 +1,4 @@
-"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotati, firmato digitalmente, link, senza permesso di stampa."""
+"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotati, firmato digitalmente, moduli, link, senza permesso di stampa."""
 import random, re, sys
 from pathlib import Path
 import pymupdf
@@ -78,6 +78,63 @@ wdg.field_name = "FirmaDigitale"
 wdg.rect = pymupdf.Rect(300, 700, 500, 760)
 d[0].add_widget(wdg)
 d.save(out / "firmato_digitale.pdf")
+
+# Moduli compilabili (#21)
+def widget(page, kind, name, rect, **attrs):
+    w = pymupdf.Widget()
+    w.field_type, w.field_name, w.rect = kind, name, pymupdf.Rect(rect)
+    w.border_color, w.border_width, w.text_fontsize = (0.4, 0.4, 0.4), 1, 11
+    for key, value in attrs.items():
+        setattr(w, key, value)
+    page.add_widget(w)
+    return w
+
+
+d = pymupdf.open()
+p = d.new_page(width=595, height=842)
+p.insert_text((72, 60), "Modulo di prova", fontsize=20)
+for y, label in [(114, "Nome"), (154, "Note"), (234, "CAP"), (274, "Codice"), (312, "Privacy"),
+                 (352, "Scelta"), (394, "Provincia"), (434, "Colore"), (534, "Firma")]:
+    p.insert_text((72, y), label, fontsize=11)
+T = pymupdf.PDF_WIDGET_TYPE_TEXT
+widget(p, T, "Nome", (150, 100, 400, 120))
+widget(p, T, "Note", (150, 140, 400, 200), field_flags=pymupdf.PDF_TX_FIELD_IS_MULTILINE)
+widget(p, T, "CAP", (150, 220, 230, 240), text_maxlen=5)
+widget(p, T, "Codice", (150, 260, 300, 280), field_value="ABC-123", field_flags=pymupdf.PDF_FIELD_IS_READ_ONLY)
+widget(p, pymupdf.PDF_WIDGET_TYPE_CHECKBOX, "Privacy", (150, 300, 166, 316), field_value=False)
+for i, state in enumerate(["Uno", "Due", "Tre"]):  # lo stato "acceso" prende il nome dal valore
+    widget(p, pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON, "Scelta", (150 + 50 * i, 340, 166 + 50 * i, 356), field_value=state)
+widget(p, pymupdf.PDF_WIDGET_TYPE_COMBOBOX, "Provincia", (150, 380, 300, 400),
+       choice_values=["Milano", "Roma", "Napoli", "Torino"], field_value="Milano")
+widget(p, pymupdf.PDF_WIDGET_TYPE_LISTBOX, "Colore", (150, 420, 300, 480),
+       choice_values=["Rosso", "Verde", "Blu"], field_value="Rosso")
+widget(p, pymupdf.PDF_WIDGET_TYPE_SIGNATURE, "Firma", (150, 520, 400, 580))
+p = d.new_page(width=595, height=842)
+p.set_rotation(90)
+p.insert_text(pymupdf.Point(100, 90) * p.derotation_matrix, "Pagina ruotata", fontsize=11, rotate=90)
+widget(p, T, "Citta", pymupdf.Rect(100, 100, 400, 120) * p.derotation_matrix)
+d.save(out / "modulo.pdf")
+# Creando i radio l'ultimo resta acceso: si parte con il gruppo spento.
+d = pymupdf.open(out / "modulo.pdf")
+for w in d[0].widgets():
+    if w.field_name == "Scelta":
+        w.field_value = False
+        w.update()
+d.saveIncr()
+d.close()
+d = pymupdf.open(out / "modulo.pdf")
+d.save(out / "modulo_cifrato.pdf", encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="pie", owner_pw="owner")
+# XFA: basta la voce /XFA nell'AcroForm perché PieDF lo riconosca.
+d.xref_set_key(d.pdf_catalog(), "AcroForm/XFA", "[(template) ()]")
+d.save(out / "modulo_xfa.pdf")
+
+d = pymupdf.open()
+for i in range(50):
+    p = d.new_page(width=595, height=842)
+    p.insert_text((72, 40), f"Modulo lungo, pagina {i + 1}", fontsize=14)
+    for j in range(20):
+        widget(p, T, f"p{i + 1}_campo{j + 1}", (150, 60 + 38 * j, 450, 80 + 38 * j), field_value=f"Valore {j + 1}")
+d.save(out / "modulo_lungo.pdf")
 
 # Link (#24). I rettangoli sono nello spazio della pagina come si vede; dove c'è un link
 # si disegna un riquadro rosso, così il controllo trova il punto da cliccare nell'immagine.

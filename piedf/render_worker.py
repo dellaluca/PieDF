@@ -8,12 +8,14 @@ Messaggi in ingresso:
     ("open", gen, path, password)        path None chiude il documento
     ("want", gen, [(page, scale), ...])   sostituisce la lista precedente
     ("links", gen, page)                  link della pagina, risposta subito
+    ("field", gen, page, xref, value)     valore di un campo modulo, solo nel documento in memoria
     ("quit",)
 Messaggi in uscita:
     ("page", gen, page, scale, width, height, stride, samples_rgb)
     ("links", gen, page, [{kind, rect, page, to, uri}, ...])
     ("error", gen, message)
     ("closed", gen)                       documento chiuso: il file non è più aperto qui
+    ("field", gen, page)                  campo applicato: i render precedenti della pagina sono vecchi
 
 Link: `rect` (x0, y0, x1, y1) e `to` (x, y) sono in punti nello spazio della pagina come
 si vede (dopo /Rotate), come `page.rect`. `kind` è "goto" (interno: `page` e `to`, con
@@ -29,6 +31,8 @@ import queue
 
 def run(requests, results) -> None:
     import pymupdf
+
+    from piedf.document import set_field_value
 
     doc = None
     gen = 0
@@ -61,6 +65,13 @@ def run(requests, results) -> None:
                     results.put(("error", gen, str(e)))
             elif kind == "want" and msg[1] == gen:
                 wanted = list(msg[2])
+            elif kind == "field" and msg[1] == gen and doc is not None:
+                _, _, page, xref, value = msg
+                try:
+                    set_field_value(doc[page], xref, value)
+                except Exception as e:
+                    results.put(("error", gen, f"Campo {xref}: {e}"))
+                results.put(("field", gen, page))
             elif kind == "links" and msg[1] == gen and doc is not None:
                 page = msg[2]
                 try:

@@ -8,6 +8,8 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QFrame,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -15,14 +17,18 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QProgressDialog,
+    QPushButton,
     QSpinBox,
     QToolBar,
     QToolButton,
+    QVBoxLayout,
+    QWidget,
     QWidgetAction,
 )
 
 from piedf import paths
-from piedf.document import OpenError, PasswordRequired, open_document
+from piedf.document import OpenError, PasswordRequired, PdfDocument, open_document
+from piedf.forms import FormValues
 from piedf.placements import Placements
 from piedf.positions import Positions
 from piedf.printing import NO_PRINT_MESSAGE, PrintJob, PrintOptions, PrintOptionsDialog, can_print, print_source, selected_pages
@@ -40,6 +46,8 @@ FIT_LABELS = {FitMode.WIDTH: "Adatta larghezza", FitMode.PAGE: "Adatta pagina"}
 ZOOM_PRESETS = [50, 75, 100, 125, 150, 200, 300, 400]
 MENU_THUMB = QSize(160, 52)
 PLACING_HINT = "Clic per posizionare la firma · Esc per annullare"
+FORM_MESSAGE = "Questo documento contiene campi compilabili."
+XFA_MESSAGE = "Questo modulo usa una tecnologia (XFA) che PieDF non supporta: i campi non si possono compilare."
 MAX_HISTORY = 50
 # Gli unici link esterni che si seguono: niente file:, launch, javascript: o altri PDF.
 SAFE_SCHEMES = ("http", "https", "mailto")
@@ -74,6 +82,8 @@ class MainWindow(QMainWindow):
         self.placements = Placements(self)
         self.placements.changed.connect(self._update_title)
         self.placements.undo_stack.cleanChanged.connect(self._update_enabled)
+        # Stesso stack delle firme: annulla/ripeti e "modificato" valgono per tutto.
+        self.forms = FormValues(self.placements.undo_stack, self)
         self._path: str | None = None
         self._password: str | None = None
         self._save_path: str | None = None  # dove scrive "Salva"; None finché non si è salvato
@@ -92,7 +102,16 @@ class MainWindow(QMainWindow):
         self.view.link_goto.connect(self._follow_link)
         self.view.link_uri.connect(self._open_uri)
         self.view.set_placements(self.placements)
-        self.setCentralWidget(self.view)
+        self.view.set_forms(self.forms)
+        self.view.set_highlight(self._settings.value("highlight_fields", True, type=bool))
+        self._build_form_bar()
+        central = QWidget()
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.form_bar)
+        layout.addWidget(self.view)
+        self.setCentralWidget(central)
 
         # Se il programma si blocca, la posizione di lettura si perde al massimo per questo intervallo.
         self._position_timer = QTimer(self)
@@ -251,6 +270,40 @@ class MainWindow(QMainWindow):
 
         self._doc_widgets = [self._page_box, self._zoom_box, self.sign_button]
 
+    def _build_form_bar(self) -> None:
+        """Barra sottile sopra la vista, solo per i documenti con campi compilabili."""
+        self.form_bar = QFrame()
+        self.form_bar.setObjectName("form_bar")
+        self.form_bar.setStyleSheet("#form_bar { background: #e8f0fe; border-bottom: 1px solid #c6d4f0; }")
+        layout = QHBoxLayout(self.form_bar)
+        layout.setContentsMargins(8, 3, 8, 3)
+        self.form_label = QLabel(FORM_MESSAGE)
+        layout.addWidget(self.form_label)
+        layout.addStretch()
+        self.highlight_button = QPushButton("Evidenzia campi")
+        self.highlight_button.setCheckable(True)
+        self.highlight_button.setChecked(self._settings.value("highlight_fields", True, type=bool))
+        self.highlight_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.highlight_button.toggled.connect(self._set_highlight)
+        layout.addWidget(self.highlight_button)
+        self.form_bar.hide()
+
+    def _set_highlight(self, on: bool) -> None:
+        self._settings.setValue("highlight_fields", on)
+        self.view.set_highlight(on)
+
+    def _update_form_bar(self, doc: PdfDocument | None) -> None:
+        if doc is not None and doc.xfa:
+            self.form_label.setText(XFA_MESSAGE)
+            self.highlight_button.hide()
+            self.form_bar.show()
+        elif doc is not None and any(f.fillable for f in doc.fields):
+            self.form_label.setText(FORM_MESSAGE)
+            self.highlight_button.show()
+            self.form_bar.show()
+        else:
+            self.form_bar.hide()
+
     def _update_enabled(self) -> None:
         has_doc = self._path is not None
         for item in self._doc_actions + self._doc_widgets:
@@ -312,6 +365,8 @@ class MainWindow(QMainWindow):
         self._save_path = None
         self._renderer.open(self._gen, path, doc.password)
         self.view.set_document(self._gen, doc.page_sizes)
+        self.forms.set_fields(doc.fields)
+        self._update_form_bar(doc)
         self._page_box.setRange(1, len(doc.page_sizes))
         self._page_total.setText(f" / {len(doc.page_sizes)} ")
         self._update_title()
@@ -337,6 +392,8 @@ class MainWindow(QMainWindow):
         self._gen += 1
         self._renderer.close(self._gen)
         self.view.clear()
+        self.forms.set_fields([])
+        self._update_form_bar(None)
         self._page_box.setRange(0, 0)
         self._page_total.setText(" / 0 ")
         self._update_title()
@@ -344,15 +401,17 @@ class MainWindow(QMainWindow):
         return True
 
     def _confirm_discard(self) -> bool:
-        """Chiede se salvare o scartare le firme non salvate; False se l'utente annulla."""
+        """Chiede se salvare o scartare le modifiche non salvate; False se l'utente annulla."""
+        self.view.commit_editor()
         if self._path is None or not self.placements.modified:
             return True
+        name = Path(self._path).name
         Button = QMessageBox.StandardButton
-        box = QMessageBox(
-            QMessageBox.Icon.Warning, "Firme non salvate",
-            f"Le firme aggiunte a «{Path(self._path).name}» non sono state salvate.",
-            Button.Save | Button.Discard | Button.Cancel, self,
-        )
+        if self.forms.changed():
+            title, text = "Modifiche non salvate", f"Le modifiche a «{name}» non sono state salvate."
+        else:
+            title, text = "Firme non salvate", f"Le firme aggiunte a «{name}» non sono state salvate."
+        box = QMessageBox(QMessageBox.Icon.Warning, title, text, Button.Save | Button.Discard | Button.Cancel, self)
         box.button(Button.Save).setText("Salva")
         box.button(Button.Discard).setText("Scarta")
         box.button(Button.Cancel).setText("Annulla")
@@ -474,6 +533,7 @@ class MainWindow(QMainWindow):
         return self._save_to(os.path.abspath(dest))
 
     def _save_to(self, dest: str) -> bool:
+        self.view.commit_editor()
         if has_digital_signatures(self._path, self._password):
             Button = QMessageBox.StandardButton
             box = QMessageBox(
@@ -497,7 +557,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Salvataggio non riuscito", "Il documento è ancora in uso, riprova.")
             return False
         try:
-            save_with_signatures(src, password, self.placements.items, dest, self.placements.missing_pngs())
+            save_with_signatures(
+                src, password, self.placements.items, dest, self.placements.missing_pngs(), self.forms.changed()
+            )
         except SaveError as e:
             if overwrite:
                 self._renderer.open(self._gen, src, password)
@@ -505,7 +567,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Salvataggio non riuscito", str(e))
             return False
 
-        # Le firme ora fanno parte del PDF: non sono più modificabili né annullabili.
+        # Le firme ora fanno parte del PDF: non sono più modificabili né annullabili (i campi sì).
         page, zoom, fit = self.view.current_page, self.view.zoom, self.view.fit_mode
         scroll_x, scroll_y = self.view.horizontalScrollBar().value(), self.view.verticalScrollBar().value()
         self.placements.clear()
@@ -576,9 +638,11 @@ class MainWindow(QMainWindow):
         if not pages:
             QMessageBox.warning(self, "Stampa", "Nessuna pagina da stampare nell'intervallo scelto.")
             return
+        self.view.commit_editor()
         try:
             path, temp = print_source(
-                self._path, self._password, self.placements.items, self.placements.missing_pngs()
+                self._path, self._password, self.placements.items, self.placements.missing_pngs(),
+                self.forms.changed(),
             )
         except SaveError as e:
             QMessageBox.critical(self, "Stampa non riuscita", str(e))
@@ -759,5 +823,6 @@ class MainWindow(QMainWindow):
         if self._print_job is not None:
             self._print_job.cancel()
             self._print_job.wait()
+        self._settings.sync()  # all'uscita Python può non distruggere QSettings
         self._renderer.shutdown()
         super().closeEvent(event)
