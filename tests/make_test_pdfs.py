@@ -1,4 +1,4 @@
-"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotati, firmato digitalmente, moduli, link, senza permesso di stampa, numerati e con indice (pagine), FreeText di un altro programma."""
+"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotati, firmato digitalmente, moduli, link, senza permesso di stampa, numerati e con indice (pagine), FreeText e Ink di un altro programma."""
 import random, re, sys
 from pathlib import Path
 import pymupdf
@@ -194,6 +194,15 @@ d = pymupdf.open(out / "semplice.pdf")
 a = d[0].add_freetext_annot(pymupdf.Rect(300, 500, 500, 530), "Nota di un altro", fontsize=14, text_color=(0, 0, 0))
 a.set_info(title="Mario Bianchi")
 d.save(out / "testo_altro.pdf")
+
+# Tratto a penna creato da un altro programma (#22): non si seleziona né si cancella con la gomma.
+d = pymupdf.open(out / "semplice.pdf")
+a = d[0].add_ink_annot([[(300.0, 500.0), (400.0, 530.0), (500.0, 500.0)]])
+a.set_border(width=3)
+a.set_colors(stroke=(0, 0.6, 0))
+a.set_info(title="Mario Bianchi")
+a.update()
+d.save(out / "disegno_altro.pdf")
 
 # Organizzare le pagine (#26): il numero grande al centro dice in che ordine sono finite.
 d = pymupdf.open()
