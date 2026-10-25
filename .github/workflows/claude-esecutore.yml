@@ -37,6 +37,10 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       QT_QPA_PLATFORM: offscreen
+      # I controlli durano minuti: con il limite predefinito di 2 minuti Claude Code
+      # sposta il comando in background e la sessione finisce mentre "aspetta".
+      BASH_DEFAULT_TIMEOUT_MS: "900000"
+      BASH_MAX_TIMEOUT_MS: "1200000"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -80,7 +84,7 @@ jobs:
             --model ${{ steps.modello.outputs.id }}
             --max-turns ${{ steps.modello.outputs.turni }}
             --allowedTools "Read,Write,Edit,Glob,Grep,WebFetch,Bash(git:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(gh issue edit:*),Bash(gh pr:*),Bash(python:*),Bash(python3:*),Bash(pip:*),Bash(timeout:*),Bash(ls:*),Bash(mkdir:*),Bash(mv:*),Bash(cp:*)"
-            --disallowedTools "Bash(gh pr merge:*),Bash(git push origin main*),Bash(git push origin HEAD:main*),Bash(git push --force*),Bash(git push -f*)"
+            --disallowedTools "Monitor,Bash(gh pr merge:*),Bash(git push origin main*),Bash(git push origin HEAD:main*),Bash(git push --force*),Bash(git push -f*)"
 
       # La trascrizione completa della sessione (l'output nel log è nascosto):
       # serve a capire perché un'esecuzione non ha prodotto la PR.
@@ -116,7 +120,10 @@ jobs:
           else
             git push -u origin "$branch"
           fi
-          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')" ]; then
+          if gh pr view "$NUMERO" --json number >/dev/null 2>&1; then
+            # Il numero è una PR: il lavoro è sul suo branch, basta dirlo lì.
+            gh pr comment "$NUMERO" --body "La sessione è finita senza pubblicare: il lavoro rimasto sul runner è stato committato e pubblicato qui («salvataggio automatico»), da controllare. Esecuzione: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          elif [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')" ]; then
             gh pr create --draft --base main --head "$branch" \
               --title "Bozza da salvataggio automatico per #$NUMERO" \
               --body "La sessione dell'esecutore è finita senza aprire la PR: qui c'è il lavoro rimasto sul runner, da controllare. Esecuzione: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
