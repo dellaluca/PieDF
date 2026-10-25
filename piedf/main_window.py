@@ -1,4 +1,5 @@
 import os
+import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QEvent, QSize, Qt, QTimer, QUrl, Signal
@@ -30,6 +31,8 @@ from piedf import paths
 from piedf.annotations import COLORS, DEFAULT_STYLE, FONT_LABELS, MAX_SIZE, MIN_SIZE, Annotations
 from piedf.document import OpenError, PasswordRequired, PdfDocument, open_document
 from piedf.forms import FormValues
+from piedf.page_ops import MAIN, PageRef
+from piedf.page_organizer import PageJob, PageOrganizer, open_with_password, run_with_progress
 from piedf.placements import Placements
 from piedf.positions import Positions
 from piedf.printing import NO_PRINT_MESSAGE, PrintJob, PrintOptions, PrintOptionsDialog, can_print, print_source, selected_pages
@@ -53,6 +56,7 @@ ALIGN_LABELS = ["Sinistra", "Centro", "Destra"]
 FORM_MESSAGE = "Questo documento contiene campi compilabili."
 XFA_MESSAGE = "Questo modulo usa una tecnologia (XFA) che PieDF non supporta: i campi non si possono compilare."
 MAX_HISTORY = 50
+SAVE_FIRST = "Salva o scarta le modifiche prima di organizzare le pagine."
 # Gli unici link esterni che si seguono: niente file:, launch, javascript: o altri PDF.
 SAFE_SCHEMES = ("http", "https", "mailto")
 
@@ -92,6 +96,11 @@ class MainWindow(QMainWindow):
         self._path: str | None = None
         self._password: str | None = None
         self._save_path: str | None = None  # dove scrive "Salva"; None finché non si è salvato
+        # Dopo "Organizza pagine" il documento aperto è un temporaneo: `_original` è il file
+        # da cui viene (nome nel titolo e proposto al salvataggio). Non None = pagine da salvare.
+        self._original: str | None = None
+        self._temps: list[str] = []  # temporanei delle pagine, da cancellare quando non servono più
+        self._page_job: PageJob | None = None
         self._gen = 0
         # Cronologia dei link interni: posizioni (pagina, y in punti) come scroll_position.
         self._back: list[tuple[int, float]] = []
@@ -175,6 +184,11 @@ class MainWindow(QMainWindow):
         )
         self.act_forward = self._action("A&vanti", self.go_forward, ["Alt+Right"])
 
+        self.act_organize = self._action("&Organizza pagine…", lambda: self.organize_pages(), ["Ctrl+Shift+O"])
+        self.act_merge = self._action("&Unisci PDF…", self.merge_files)
+        self.act_rotate_left = self._action("Ruota pagina corrente a &sinistra", lambda: self.rotate_current(-90))
+        self.act_rotate_right = self._action("Ruota pagina corrente a &destra", lambda: self.rotate_current(90))
+
         # Il testo segue l'ultimo comando: "Annulla spostamento firma".
         stack = self.placements.undo_stack
         self.act_undo = stack.createUndoAction(self, "Annulla")
@@ -187,7 +201,7 @@ class MainWindow(QMainWindow):
         self._doc_actions = [
             self.act_save_as, self.act_print, self.act_close, self.act_zoom_in, self.act_zoom_out, self.act_actual,
             self.act_fit_page, self.act_fit_width, self.act_prev, self.act_next, self.act_goto,
-            self.act_text, self.act_date,
+            self.act_text, self.act_date, self.act_organize, self.act_rotate_left, self.act_rotate_right,
         ]
 
     def _build_menu(self) -> None:
@@ -221,6 +235,13 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self.act_back)
         view_menu.addAction(self.act_forward)
+
+        pages_menu = self.menuBar().addMenu("&Pagine")
+        pages_menu.addAction(self.act_organize)
+        pages_menu.addAction(self.act_merge)
+        pages_menu.addSeparator()
+        pages_menu.addAction(self.act_rotate_left)
+        pages_menu.addAction(self.act_rotate_right)
 
         sign_menu = self.menuBar().addMenu("F&irma")
         sign_menu.addAction("Crea &firma…", lambda: self.create_signature(Kind.SIGNATURE))
@@ -425,14 +446,23 @@ class MainWindow(QMainWindow):
         has_doc = self._path is not None
         for item in self._doc_actions + self._doc_widgets:
             item.setEnabled(has_doc)
-        self.act_save.setEnabled(has_doc and self.placements.modified)
+        self.act_save.setEnabled(has_doc and self.modified)
         self.act_back.setEnabled(has_doc and bool(self._back))
         self.act_forward.setEnabled(has_doc and bool(self._forward))
 
+    @property
+    def modified(self) -> bool:
+        """Firme, campi o pagine da salvare."""
+        return self.placements.modified or self._original is not None
+
+    def _shown_path(self) -> str:
+        """Il file che l'utente conosce: l'originale se il documento aperto è un temporaneo."""
+        return self._original or self._path
+
     def _update_title(self) -> None:
         if self._path:
-            star = "* " if self.placements.modified else ""
-            self.setWindowTitle(f"{star}{Path(self._path).name} – PieDF")
+            star = "* " if self.modified else ""
+            self.setWindowTitle(f"{star}{Path(self._shown_path()).name} – PieDF")
         else:
             self.setWindowTitle("PieDF")
 
@@ -474,12 +504,27 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard():
             return False
         self._save_position()
+        self._set_document(path, doc)
+        self._add_recent(path)
+        self._restore_position(path, len(doc.page_sizes))
+        self.view.setFocus()
+        if doc.repaired:
+            self.statusBar().showMessage("Il file era danneggiato ed è stato riparato per la lettura.", 10000)
+        else:
+            self.statusBar().clearMessage()
+        return True
+
+    def _set_document(
+        self, path: str, doc: PdfDocument, original: str | None = None, save_path: str | None = None,
+    ) -> None:
+        """Mostra `doc` (già aperto e con la password giusta) senza chiedere nulla."""
         self.placements.clear()
         self._clear_history()
         self._gen += 1
         self._path = path
         self._password = doc.password
-        self._save_path = None
+        self._save_path = save_path
+        self._original = original
         self._renderer.open(self._gen, path, doc.password)
         self.view.set_document(self._gen, doc.page_sizes)
         self.forms.set_fields(doc.fields)
@@ -489,14 +534,7 @@ class MainWindow(QMainWindow):
         self._page_total.setText(f" / {len(doc.page_sizes)} ")
         self._update_title()
         self._update_enabled()
-        self._add_recent(path)
-        self._restore_position(path, len(doc.page_sizes))
-        self.view.setFocus()
-        if doc.repaired:
-            self.statusBar().showMessage("Il file era danneggiato ed è stato riparato per la lettura.", 10000)
-        else:
-            self.statusBar().clearMessage()
-        return True
+        self._remove_temps()
 
     def close_document(self) -> bool:
         if not self._confirm_discard():
@@ -507,8 +545,10 @@ class MainWindow(QMainWindow):
         self._path = None
         self._password = None
         self._save_path = None
+        self._original = None
         self._gen += 1
         self._renderer.close(self._gen)
+        self._remove_temps()
         self.view.clear()
         self.forms.set_fields([])
         self.annotations.set_items([])
@@ -522,11 +562,11 @@ class MainWindow(QMainWindow):
     def _confirm_discard(self) -> bool:
         """Chiede se salvare o scartare le modifiche non salvate; False se l'utente annulla."""
         self.view.commit_editor()
-        if self._path is None or not self.placements.modified:
+        if self._path is None or not self.modified:
             return True
-        name = Path(self._path).name
+        name = Path(self._shown_path()).name
         Button = QMessageBox.StandardButton
-        if self.forms.changed() or self.annotations.pending() is not None:
+        if self.forms.changed() or self.annotations.pending() is not None or self._original is not None:
             title, text = "Modifiche non salvate", f"Le modifiche a «{name}» non sono state salvate."
         else:
             title, text = "Firme non salvate", f"Le firme aggiunte a «{name}» non sono state salvate."
@@ -543,8 +583,8 @@ class MainWindow(QMainWindow):
     # --- Posizione di lettura ---------------------------------------------------------
 
     def _save_position(self, force: bool = True) -> None:
-        if self._path is None or not self.view.page_count:
-            return
+        if self._path is None or self._path in self._temps or not self.view.page_count:
+            return  # di un temporaneo non si ricorda la posizione
         page, y = self.view.scroll_position()
         fit, zoom = FIT_NAMES[self.view.fit_mode], self.view.zoom
         if force or not self._positions.same(self._path, page, y, fit, zoom):
@@ -639,12 +679,12 @@ class MainWindow(QMainWindow):
         if self._save_path is not None:
             proposed = self._save_path
         else:
-            src = Path(self._path)
-            proposed = str(src.with_name(f"{src.stem}_firmato.pdf"))
+            src = Path(self._shown_path())
+            suffix = "_modificato" if self._original is not None else "_firmato"
+            proposed = str(src.with_name(f"{src.stem}{suffix}.pdf"))
+        title = "Salva PDF modificato" if self._original is not None else "Salva PDF firmato"
         # Il dialog chiede già la conferma se il file esiste.
-        dest, _ = QFileDialog.getSaveFileName(
-            self, "Salva PDF firmato", proposed, "Documenti PDF (*.pdf)"
-        )
+        dest, _ = QFileDialog.getSaveFileName(self, title, proposed, "Documenti PDF (*.pdf)")
         if not dest:
             return False
         if not Path(dest).suffix:
@@ -692,6 +732,7 @@ class MainWindow(QMainWindow):
         page, zoom, fit = self.view.current_page, self.view.zoom, self.view.fit_mode
         scroll_x, scroll_y = self.view.horizontalScrollBar().value(), self.view.verticalScrollBar().value()
         self.placements.clear()
+        self._original = None  # le pagine ora sono nel file salvato
         if not self.open_file(dest, password):
             return False
         if fit == FitMode.NONE:
@@ -800,6 +841,127 @@ class MainWindow(QMainWindow):
         job.progress.connect(on_progress)
         job.finished.connect(on_finished)
         job.start()
+
+    # --- Pagine -----------------------------------------------------------------------
+
+    def _ensure_saved(self) -> bool:
+        """Le pagine si organizzano solo senza firme, campi o caselle di testo da salvare: chiede Salva/Scarta/Annulla."""
+        self.view.commit_editor()
+        if self._path is None:
+            return False
+        if not self.placements.modified:
+            return True
+        Button = QMessageBox.StandardButton
+        box = QMessageBox(
+            QMessageBox.Icon.Warning, "Modifiche non salvate", SAVE_FIRST,
+            Button.Save | Button.Discard | Button.Cancel, self,
+        )
+        box.button(Button.Save).setText("Salva")
+        box.button(Button.Discard).setText("Scarta")
+        box.button(Button.Cancel).setText("Annulla")
+        box.setDefaultButton(Button.Save)
+        answer = box.exec()
+        if answer == Button.Save:
+            return self.save() and not self.placements.modified
+        if answer != Button.Discard:
+            return False
+        # Scarta: si riparte dal file (anche da un temporaneo di pagine, che resta da salvare).
+        self.view.cancel_placing()
+        try:
+            doc = open_document(self._path, self._password)
+        except (OpenError, PasswordRequired) as e:
+            QMessageBox.critical(self, "Impossibile riaprire il documento", str(e))
+            return False
+        position = self.view.scroll_position()
+        self._set_document(self._path, doc, self._original, self._save_path)
+        self.view.set_scroll_position(*position)
+        return True
+
+    def organize_pages(self, files: list[tuple[str, PdfDocument]] = ()) -> None:
+        """Apre "Organizza pagine"; i `files` (Unisci PDF) si aggiungono in fondo."""
+        if self._page_job is not None or not self._ensure_saved():
+            return
+        self.view.cancel_placing()
+        dialog = PageOrganizer(self._path, self._password, self.view.page_sizes, self._shown_path(), self)
+        for path, doc in files:
+            dialog.add_document(path, doc, at=len(dialog.refs))
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        sources, refs, changed = dialog.sources, dialog.refs, dialog.changed
+        dialog.deleteLater()
+        if accepted and changed:
+            self.apply_pages(sources, refs)
+
+    def merge_files(self) -> None:
+        start = str(Path(self._shown_path()).parent) if self._path else ""
+        paths, _ = QFileDialog.getOpenFileNames(self, "Unisci PDF", start, "Documenti PDF (*.pdf)")
+        if not paths:
+            return
+        if self._path is None:  # senza documento aperto il primo file diventa il documento
+            if not self.open_file(paths[0]):
+                return
+            paths = paths[1:]
+        elif not self._ensure_saved():
+            return
+        files = []
+        for path in paths:
+            doc = open_with_password(self, path)
+            if doc is not None:
+                files.append((os.path.abspath(path), doc))
+        if files or not paths:
+            self.organize_pages(files)
+
+    def rotate_current(self, delta: int) -> None:
+        if self._page_job is not None or not self._ensure_saved():
+            return
+        current = self.view.current_page
+        refs = [PageRef(MAIN, i, size, delta % 360 if i == current else 0) for i, size in enumerate(self.view.page_sizes)]
+        self.apply_pages([(self._path, self._password)], refs)
+
+    def apply_pages(self, sources: list[tuple[str, str | None]], refs: list[PageRef]) -> None:
+        """Costruisce il documento riorganizzato in un temporaneo (fuori dalla GUI) e lo mostra
+        come documento modificato, alla stessa pagina e zoom."""
+        fd, tmp = tempfile.mkstemp(prefix="piedf-pagine-", suffix=".pdf")
+        os.close(fd)
+        self._temps.append(tmp)
+        job = PageJob(sources, refs, tmp, self._password, self)
+        self._page_job = job
+        original = self._shown_path()
+        gen = self._gen
+
+        def done(doc, error: str) -> None:
+            self._page_job = None
+            if doc is None or gen != self._gen:
+                self._remove_temps()
+                if error:
+                    QMessageBox.critical(self, "Modifica delle pagine non riuscita", error)
+                return
+            page, zoom, fit = self.view.current_page, self.view.zoom, self.view.fit_mode
+            self._set_document(tmp, doc, original)
+            if fit == FitMode.NONE:
+                self.view.set_zoom(zoom)
+            else:
+                self.view.set_fit_mode(fit)
+            self.view.go_to_page(min(page, len(doc.page_sizes) - 1))
+            self.view.setFocus()
+            self.statusBar().showMessage("Pagine modificate: salva per conservare le modifiche.", 10000)
+
+        run_with_progress(self, job, "Modifica delle pagine…", done)
+
+    def _remove_temps(self) -> None:
+        """Cancella i temporanei delle pagine non più aperti (su Windows un file ancora aperto
+        dal processo di render non si cancella: si riprova la volta dopo, al più tardi all'uscita)."""
+        keep = []
+        for path in self._temps:
+            if path == self._path or (self._page_job is not None and path == self._page_job.dest):
+                keep.append(path)
+                continue
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                keep.append(path)
+        self._temps = keep
 
     def _on_render_failed(self, gen: int, message: str) -> None:
         if gen == self._gen:
@@ -950,6 +1112,10 @@ class MainWindow(QMainWindow):
         if self._print_job is not None:
             self._print_job.cancel()
             self._print_job.wait()
+        if self._page_job is not None:
+            self._page_job.cancel()
         self._settings.sync()  # all'uscita Python può non distruggere QSettings
         self._renderer.shutdown()
+        self._path = None
+        self._remove_temps()
         super().closeEvent(event)

@@ -54,13 +54,15 @@ jobs:
 
       - name: Controlli end-to-end
         run: |
+          set -o pipefail
           esito=0
           for f in tests/check_*.py; do
             # check_exe ha bisogno di finestre vere: gira nel suo passo, dopo la build.
             [ "$f" = tests/check_exe.py ] && continue
             echo "::group::$f"
-            if ! timeout 600 python -u "$f"; then
+            if ! timeout 600 python -u "$f" 2>&1 | tee esito.txt; then
               echo "::error file=$f::$f non superato"
+              { echo "**$f**"; echo '```'; grep -E "^FAIL|Traceback|Error" esito.txt | head -20; echo '```'; } >> fallimenti.md
               esito=1
             fi
             echo "::endgroup::"
@@ -74,7 +76,12 @@ jobs:
 
       - name: Controlla l'exe
         # Senza offscreen: l'exe deve aprire una finestra vera.
-        run: env -u QT_QPA_PLATFORM timeout 300 python -u tests/check_exe.py
+        run: |
+          set -o pipefail
+          if ! env -u QT_QPA_PLATFORM timeout 300 python -u tests/check_exe.py 2>&1 | tee esito.txt; then
+            { echo "**tests/check_exe.py**"; echo '```'; grep -E "^FAIL|Traceback|Error" esito.txt | head -20; echo '```'; } >> fallimenti.md
+            exit 1
+          fi
 
       - name: Allega lo zip
         uses: actions/upload-artifact@v4
@@ -82,3 +89,61 @@ jobs:
           name: PieDF-win64
           path: dist/PieDF-*-win64.zip
           retention-days: 14
+
+      # Per il job "ritenta": l'elenco dei controlli falliti.
+      - name: Salva i fallimenti
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fallimenti
+          path: fallimenti.md
+          if-no-files-found: ignore
+          retention-days: 3
+
+  # Se il Build fallisce sul branch di una PR dei worker, rimanda la PR all'esecutore
+  # con le righe FAIL, al massimo 2 volte per PR: si sistema da sola senza aspettare
+  # un "@claude" a mano. Un commento del GITHUB_TOKEN non avvia workflow, quindi
+  # l'esecutore si lancia direttamente con workflow_dispatch.
+  ritenta:
+    needs: controlli
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BRANCH: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: fallimenti
+        continue-on-error: true
+
+      - name: Rimanda la PR all'esecutore
+        run: |
+          pr=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$pr" ]; then echo "Nessuna PR aperta su $BRANCH"; exit 0; fi
+          etichette=$(gh pr view "$pr" --json labels --jq '[.labels[].name] | join(",")')
+          # Solo le PR dei worker (hanno un'etichetta claude:<modello>).
+          case "$etichette" in *claude:haiku*|*claude:sonnet*|*claude:opus*) ;; *) echo "PR #$pr non è dei worker"; exit 0 ;; esac
+          tentativi=$(gh pr view "$pr" --json comments --jq '[.comments[].body | select(contains("<!-- ritenta-build -->"))] | length')
+          if [ "$tentativi" -ge 2 ]; then
+            echo "Già 2 tentativi automatici su PR #$pr: serve un'occhiata a mano"
+            exit 0
+          fi
+          modello=sonnet
+          case "$etichette" in *claude:opus*) modello=opus ;; esac
+          {
+            echo "<!-- ritenta-build -->"
+            echo "Il **Build su Windows** è fallito (tentativo automatico $((tentativi + 1)) di 2): ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            cat fallimenti.md 2>/dev/null || echo "Nessun dettaglio salvato: guarda il log della run."
+            echo
+            echo "Correggi questi fallimenti sul branch della PR, senza indebolire i controlli."
+          } > commento.md
+          gh pr comment "$pr" --body-file commento.md
+          gh workflow run claude-esecutore.yml -f numero="$pr" -f modello="$modello"

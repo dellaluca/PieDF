@@ -25,10 +25,11 @@ L'ambiente ha già Python 3.12, le dipendenze di `requirements.txt` e Qt in moda
 - `QT_QPA_PLATFORM` è già impostata: **non** mettere variabili davanti ai comandi (`VAR=x python …`, `export …`): sono bloccati dai permessi. Lancia direttamente `python …`, `timeout 600 python -u …`.
 - Lancia tutto **in primo piano** e aspetta il risultato nello stesso comando. Niente `run_in_background`, `&`, `Monitor` o "aspetto che finisca": non c'è nessuno che ti risveglia.
 - Committa spesso (dopo ogni passo che funziona) e fai `git push` del branch appena hai il primo commit: se la sessione si interrompe, il lavoro resta.
+- **Un comando per chiamata**, senza catene con `for`, `git stash … && …` o pipe complicate: i permessi controllano ogni pezzo della catena e la rifiutano intera. Per i controlli c'è `python tests/run_all.py`, che li fa tutti.
 
-1. Genera i PDF di prova: `python tests/make_test_pdfs.py` (finiscono in `tests/out/`, ignorata da git). Se il ticket ha bisogno di PDF di prova nuovi, aggiungili lì.
+1. I PDF di prova si generano con `python tests/make_test_pdfs.py` (finiscono in `tests/out/`, ignorata da git; `run_all.py` lo fa da solo). Se il ticket ha bisogno di PDF di prova nuovi, aggiungili lì.
 2. Ogni ticket aggiunge o estende un controllo `tests/check_<area>.py` con lo stesso stile di quelli esistenti (funzione `check(nome, ok, info)`, riepilogo `N/M ok`, uscita 1 se qualcosa fallisce). I criteri di accettazione del ticket devono diventare controlli.
-3. Prima della PR esegui **tutti** i `tests/check_*.py` (`timeout 600 python -u tests/check_xxx.py`) e correggi quello che fallisce.
+3. Prima della PR esegui **tutti** i controlli con `python tests/run_all.py` (uno solo: `python tests/run_all.py pages`) e correggi quello che fallisce. Se un controllo di tempo (pause della GUI) fallisce di poco e al secondo giro passa, non è un errore tuo: scrivilo nella PR.
 4. Stai girando su Linux: i controlli che dipendono da Windows (font di sistema, comportamento di Esplora risorse) vanno saltati con `sys.platform != "win32"` e dichiarati nella PR. Il build della PR li esegue su Windows.
 5. Quello che non puoi verificare (aspetto reale, interazione vera con mouse o penna) va scritto nella PR alla voce "Non verificato".
 
@@ -47,7 +48,7 @@ L'ambiente ha già Python 3.12, le dipendenze di `requirements.txt` e Qt in moda
 ## Se il numero è una PR
 
 1. `gh pr checkout <N>`.
-2. Applica le modifiche chieste nei commenti più recenti.
+2. Applica le modifiche chieste nei commenti più recenti. Se l'ultimo commento è del **Build su Windows** (righe `FAIL` dei controlli), correggi quei fallimenti: su Linux spesso non si riproducono (file bloccati, processi che non si chiudono, tempi), quindi ragiona sul codice e rendilo robusto anche su Windows, senza indebolire il controllo.
 3. Rilancia i controlli, poi commit e `git push` sullo stesso branch.
 4. Rispondi nella PR con un commento che riassume cosa hai cambiato.
 

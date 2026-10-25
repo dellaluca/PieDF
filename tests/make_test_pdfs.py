@@ -1,4 +1,4 @@
-"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotati, firmato digitalmente, moduli, link, senza permesso di stampa, FreeText di un altro programma."""
+"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotati, firmato digitalmente, moduli, link, senza permesso di stampa, numerati e con indice (pagine), FreeText di un altro programma."""
 import random, re, sys
 from pathlib import Path
 import pymupdf
@@ -194,6 +194,23 @@ d = pymupdf.open(out / "semplice.pdf")
 a = d[0].add_freetext_annot(pymupdf.Rect(300, 500, 500, 530), "Nota di un altro", fontsize=14, text_color=(0, 0, 0))
 a.set_info(title="Mario Bianchi")
 d.save(out / "testo_altro.pdf")
+
+# Organizzare le pagine (#26): il numero grande al centro dice in che ordine sono finite.
+d = pymupdf.open()
+for i in range(10):
+    p = d.new_page(width=595, height=842)
+    p.insert_text((200, 480), f"{i + 1}", fontsize=200)
+d.save(out / "numerato_10.pdf")
+
+# Indice a 3 voci (pagine 1, 3, 5) e a pagina 3 un'annotazione e un campo, che devono seguirla.
+d = pymupdf.open()
+for i in range(5):
+    p = d.new_page(width=595, height=842)
+    p.insert_text((200, 480), f"{i + 1}", fontsize=200)
+d.set_toc([[1, "Inizio", 1], [1, "Centro", 3], [2, "Fine", 5]])
+d[2].add_text_annot((60, 60), "Nota di pagina 3")
+widget(d[2], T, "CampoPagina3", (150, 700, 400, 720), field_value="Testo di pagina 3")
+d.save(out / "struttura_5.pdf")
 
 data = (out / "lungo_350.pdf").read_bytes()
 (out / "danneggiato.pdf").write_bytes(data[: len(data) // 2])  # troncato a metà: irrecuperabile
