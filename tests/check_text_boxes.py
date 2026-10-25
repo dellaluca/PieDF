@@ -473,6 +473,45 @@ def main():
     path, temp = print_source(str(out1), None, [], {}, [], None)
     check("stampa: senza modifiche si stampa il file così com'è", path == str(out1) and temp is None)
 
+    # --- Organizza / Ruota pagina (#26): prima si salvano le caselle, che poi restano modificabili ---
+    def wait_job(limit=60.0):
+        t = time.perf_counter()
+        while w._page_job is not None and time.perf_counter() - t < limit:
+            app.processEvents(); time.sleep(0.005)
+        pump(0.1)
+        return w._page_job is None
+
+    src = copy("semplice.pdf", "pagine.pdf")
+    open_doc(src)
+    box = add_text(0, 100, 300, "Prima di ruotare")
+    box_answers.append(QMessageBox.StandardButton.Cancel)
+    w.organize_pages()
+    check("pagine: Organizza con una casella non salvata chiede di salvare (Annulla)",
+          not box_answers and w._page_job is None and model.pending() is not None and w._original is None)
+    box_answers.append(QMessageBox.StandardButton.Cancel)
+    w.rotate_current(90)
+    check("pagine: anche Ruota pagina corrente", not box_answers and w._page_job is None and model.pending() is not None)
+    saved = work / "pagine_testo.pdf"
+    box_answers.append(QMessageBox.StandardButton.Save)
+    save_answers.append(str(saved))
+    w.rotate_current(90)
+    check("pagine: Salva e poi ruota", wait_job() and w._original == str(saved) and w.modified, str(errors))
+    box = model.items[0] if len(model.items) == 1 else None
+    check("pagine: la casella salvata è nel temporaneo e torna nel modello", box is not None
+          and box.text == "Prima di ruotare" and model.pending() is None
+          and [f["text"] for f in freetexts(w._path)] == ["Prima di ruotare"])
+    if box is not None:
+        show(box.page, box.rect[1])
+    check("pagine: il processo di render la toglie (nessun doppione)", box is not None and inked_in_view_cache(0, box.rect) == 0)
+    check("pagine: la vista disegna la casella nel temporaneo", box is not None and inked_on_screen(box) > 20)
+    click(center(box))
+    key(Qt.Key.Key_Delete)
+    rotated = work / "pagine_ruotata.pdf"
+    check("pagine: nel temporaneo la casella si elimina", not model.items and save_as(rotated))
+    doc = pymupdf.open(rotated)
+    check("pagine: salvato ruotato e senza la casella", doc[0].rotation == 90 and not freetexts(rotated))
+    doc.close()
+
     # --- Il documento aperto dalla GUI resta chiuso; open_document legge le caselle ---
     doc = open_document(str(work / "formato.pdf"))
     check("open_document: PdfDocument.annotations", len(doc.annotations) == 1 and isinstance(doc.annotations[0], TextBox))
