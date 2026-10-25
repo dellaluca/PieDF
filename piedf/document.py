@@ -3,7 +3,9 @@ from dataclasses import dataclass, field
 
 import pymupdf
 
-A4 = (595.0, 842.0)
+from piedf.ink import bounds as ink_bounds
+
+A4 =(595.0, 842.0)
 OFF = "Off"  # valore di una casella o di un gruppo radio senza spunta
 
 # Annotazioni modificabili di PieDF: si riconoscono dal titolo (/T).
@@ -85,6 +87,28 @@ class TextBox(Annotation):
     size: float = 11.0
     color: str = "#000000"
     align: int = 0  # 0 sinistra, 1 centro, 2 destra
+
+
+@dataclass(eq=False)
+class Ink(Annotation):
+    """Tratto a mano libera (penna o evidenziatore), salvato come annotazione Ink.
+
+    `rect` contiene i punti più metà spessore (quello che si vede): si ricalcola con `ink_rect`.
+    """
+
+    subtype = "Ink"
+    # Punti PDF (x, y), pagina come si vede, già levigati e semplificati. Un tratto di PieDF
+    # è una Ink sola con un tratto; una Ink con più tratti si muove e si cancella tutta insieme.
+    strokes: tuple[tuple[tuple[float, float], ...], ...] = ()
+    color: str = "#000000"
+    width: float = 2.0  # punti
+    opacity: float = 1.0  # 0,35 per l'evidenziatore
+
+
+def ink_rect(strokes, width: float) -> tuple[float, float, float, float]:
+    x0, y0, x1, y1 = ink_bounds(strokes)
+    r = width / 2
+    return (x0 - r, y0 - r, x1 + r, y1 + r)
 
 
 @dataclass
@@ -267,9 +291,12 @@ def _states(doc, xref: int) -> set[str]:
 # --- Annotazioni di PieDF ---------------------------------------------------------------
 
 
+PIEDF_TYPES = (pymupdf.PDF_ANNOT_FREE_TEXT, pymupdf.PDF_ANNOT_INK)
+
+
 def is_piedf_annot(annot) -> bool:
-    """Annotazione creata da PieDF (e quindi modificabile qui): per ora solo le FreeText."""
-    return annot.type[0] == pymupdf.PDF_ANNOT_FREE_TEXT and annot.info.get("title") == PIEDF_TITLE
+    """Annotazione creata da PieDF (e quindi modificabile qui): caselle di testo e tratti."""
+    return annot.type[0] in PIEDF_TYPES and annot.info.get("title") == PIEDF_TITLE
 
 
 def piedf_annots(page) -> list:
@@ -290,10 +317,38 @@ def _read_annotations(doc) -> list[Annotation]:
             continue
         for annot in annots:
             try:
-                items.append(_read_text_box(doc, page, index, annot))
+                if annot.type[0] == pymupdf.PDF_ANNOT_INK:
+                    items.append(_read_ink(page, index, annot))
+                else:
+                    items.append(_read_text_box(doc, page, index, annot))
             except Exception:
                 pass
     return items
+
+
+def _read_ink(page, index: int, annot) -> Ink:
+    m = page.rotation_matrix
+    strokes = tuple(
+        tuple((q.x, q.y) for q in (pymupdf.Point(p) * m for p in stroke))
+        for stroke in annot.vertices or () if stroke
+    )
+    if not strokes:
+        raise ValueError("Ink senza punti")
+    stroke = annot.colors.get("stroke") or (0.0, 0.0, 0.0)
+    width = annot.border.get("width", -1)
+    width = width if width and width > 0 else 1.0
+    opacity = annot.opacity
+    # PyMuPDF legge /CA come float a 32 bit (0,35 → 0,3499…): bastano due decimali.
+    opacity = round(opacity, 2) if 0 <= opacity < 1 else 1.0
+    return Ink(
+        page=index,
+        rect=ink_rect(strokes, width),
+        xref=annot.xref,
+        strokes=strokes,
+        color=_hex(stroke),
+        width=width,
+        opacity=opacity,
+    )
 
 
 def _read_text_box(doc, page, index: int, annot) -> TextBox:
@@ -322,6 +377,14 @@ def _da_color(da: str) -> str:
     else:
         gray = re.search(r"([\d.]+)\s+g\b", da)
         values = [float(gray.group(1))] * 3 if gray else [0.0] * 3
+    return _hex(values)
+
+
+def _hex(values) -> str:
+    if len(values) == 1:  # grigio
+        values = list(values) * 3
+    elif len(values) != 3:  # CMYK o altro: nero
+        values = [0.0] * 3
     return "#" + "".join(f"{max(0, min(255, round(v * 255))):02x}" for v in values)
 
 
@@ -345,6 +408,27 @@ def add_text_box(page, box: TextBox):
     annot.set_flags(pymupdf.PDF_ANNOT_IS_PRINT)
     # PyMuPDF scrive una linea di richiamo (/CL) anche senza `callout`: qualche lettore la disegna.
     page.parent.xref_set_key(annot.xref, "CL", "null")
+    return annot
+
+
+def add_ink(page, ink: Ink):
+    """Scrive il tratto come Ink di PieDF sulla pagina (punti come si vede)."""
+    m = page.derotation_matrix
+    strokes = []
+    for stroke in ink.strokes:
+        # Liste di coppie di float: con oggetti Point PyMuPDF solleva ValueError.
+        points = [(q.x, q.y) for q in (pymupdf.Point(x, y) * m for x, y in stroke)]
+        if len(points) == 1:
+            points.append(points[0])  # un puntino: MuPDF lo disegna come segmento nullo con estremi tondi
+        strokes.append(points)
+    annot = page.add_ink_annot(strokes)
+    annot.set_border(width=ink.width)
+    annot.set_colors(stroke=_rgb(ink.color))
+    if ink.opacity < 1:
+        annot.set_opacity(ink.opacity)
+    annot.set_info(title=PIEDF_TITLE)
+    annot.set_flags(pymupdf.PDF_ANNOT_IS_PRINT)
+    annot.update()
     return annot
 
 

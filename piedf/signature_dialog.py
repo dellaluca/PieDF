@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from piedf.ink import smooth_points
 from piedf.signatures import Kind, Signature, SignatureStore, finalize, remove_background
 
 INK_COLORS = {"Nero": QColor("#111111"), "Blu": QColor("#1a3d8f")}
@@ -212,12 +213,14 @@ class SignaturePad(QWidget):
 
 
 def smooth_path(points: list[QPointF]) -> QPainterPath:
-    """Curva morbida che passa per i punti medi: toglie gli spigoli del mouse."""
-    path = QPainterPath(points[0])
-    for prev, cur in zip(points, points[1:]):
-        mid = (prev + cur) / 2
-        path.quadTo(prev, mid)
-    path.lineTo(points[-1])
+    """Curva morbida che passa per i punti medi: toglie gli spigoli del mouse.
+
+    I punti della curva li calcola `ink.smooth_points`, la stessa del disegno sul PDF (#22).
+    """
+    smooth = smooth_points([(p.x(), p.y()) for p in points])
+    path = QPainterPath(QPointF(*smooth[0]))
+    for x, y in smooth[1:]:
+        path.lineTo(x, y)
     return path
 
 

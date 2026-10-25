@@ -22,7 +22,7 @@ si vede (dopo /Rotate), come `page.rect`. `kind` è "goto" (interno: `page` e `t
 None per le coordinate che la destinazione non indica) oppure "uri" (esterno: `uri`
 così com'è, anche file:, launch e link ad altri PDF; decide la GUI cosa seguire).
 
-Le annotazioni di PieDF (caselle di testo) le disegna la vista dal suo modello: qui si
+Le annotazioni di PieDF (caselle di testo e tratti) le disegna la vista dal suo modello: qui si
 cancellano dal documento in memoria prima del primo render di ogni pagina, così non
 compaiono due volte. Il file non si tocca.
 
