@@ -1,9 +1,9 @@
-"""Scrittura delle firme piazzate e dei campi compilati nel PDF (senza Qt nella logica:
-i rettangoli arrivano da `Placement`).
+"""Scrittura delle firme piazzate, dei campi compilati e delle annotazioni di PieDF nel PDF
+(senza Qt nella logica: i rettangoli arrivano da `Placement`).
 
 Ogni firma diventa un'immagine sopra la pagina (`page.insert_image`); i campi restano
-campi (si scrive solo il valore e il suo aspetto). Il resto del documento non viene
-toccato né rasterizzato.
+campi (si scrive solo il valore e il suo aspetto); le caselle di testo restano annotazioni
+FreeText modificabili. Il resto del documento non viene toccato né rasterizzato.
 """
 
 import os
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pymupdf
 
-from piedf.document import set_field_value
+from piedf.document import TextBox, add_text_box, set_field_value
 
 TMP_SUFFIX = ".piedf-tmp"
 
@@ -38,11 +38,14 @@ def has_digital_signatures(path: str, password: str | None = None) -> bool:
 def save_with_signatures(
     src: str, password: str | None, placements: Iterable, dest: str,
     streams: dict[Path, bytes] | None = None, fields: Iterable[tuple[int, int, str]] = (),
+    annotations: tuple[list[tuple[int, int]], list] | None = None,
 ) -> None:
     """Scrive `src` con le firme e i campi in `dest` (anche lo stesso file). Solleva `SaveError`.
 
     `streams` dà il PNG di una firma il cui file non c'è più (eliminata da "Le mie firme").
     `fields` sono i valori cambiati dei campi modulo: (pagina, xref del widget, valore).
+    `annotations` (da `Annotations.pending`): le annotazioni di PieDF lette dal file,
+    (pagina, xref), si cancellano e si riscrivono tutte quelle del modello; None = non cambiate.
     Il file sorgente non deve essere aperto da altri processi (render) se `dest` è `src`.
     """
     streams = streams or {}
@@ -59,6 +62,18 @@ def save_with_signatures(
 
         for page, xref, value in fields:
             set_field_value(doc[page], xref, value)
+
+        if annotations is not None:
+            # Tutte da capo: modifiche, spostamenti ed eliminazioni restano coerenti.
+            original, items = annotations
+            for index, xref in original:
+                page = doc[index]
+                annot = page.load_annot(xref)
+                if annot is not None:
+                    page.delete_annot(annot)
+            for item in items:
+                if isinstance(item, TextBox):
+                    add_text_box(doc[item.page], item)
 
         xrefs: dict[Path, int] = {}  # stesso PNG piazzato più volte → una sola copia nel file
         for pl in placements:
