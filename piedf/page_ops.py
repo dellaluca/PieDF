@@ -136,20 +136,23 @@ def _open(path: str, password: str | None):
 
 
 def _remove_toc_items(doc, dropped: list[int]) -> None:
-    """Toglie dall'indice le voci `dropped` (indici in `toc`, letto prima delle modifiche).
+    """Toglie dall'indice le voci `dropped` (posizioni nell'indice letto prima delle modifiche).
 
-    I figli di una voce tolta salgono di livello, perché l'indice resti valido per set_toc.
+    I figli di una voce tolta salgono di un livello, così l'indice resta valido per set_toc.
     """
     # delete_pages lascia le voci senza destinazione, quindi sono ancora tutte e nello stesso ordine.
     gone = set(dropped)
-    after = [item for i, item in enumerate(doc.get_toc(simple=False)) if i not in gone]
     fixed = []
-    level = 0
-    for item in after:
-        item = list(item)
-        item[0] = min(item[0], level + 1)
-        level = item[0]
-        fixed.append(item)
+    ancestors: list[tuple[int, bool]] = []  # (livello, tolta) delle voci che contengono quella attuale
+    for i, item in enumerate(doc.get_toc(simple=False)):
+        while ancestors and ancestors[-1][0] >= item[0]:
+            ancestors.pop()
+        removed = i in gone
+        if not removed:
+            level = item[0] - sum(1 for _, r in ancestors if r)
+            level = max(1, min(level, (fixed[-1][0] + 1) if fixed else 1))
+            fixed.append([level, *item[1:]])
+        ancestors.append((item[0], removed))
     doc.set_toc(fixed)
 
 
