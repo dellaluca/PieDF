@@ -1,6 +1,6 @@
 # Sviluppo
 
-Le informazioni tecniche per chi lavora sul codice di PieDF. Le decisioni di progetto sono in [CLAUDE.md](../CLAUDE.md), l'automazione dei ticket in [automazione.md](automazione.md), la firma delle release in [firma-codice.md](firma-codice.md).
+Le informazioni tecniche per chi lavora sul codice di PieDF. Le decisioni di progetto sono in [CLAUDE.md](../CLAUDE.md), l'automazione dei ticket in [automazione.md](automazione.md).
 
 ## Ambiente
 
@@ -50,4 +50,4 @@ Le immagini in `docs/img/` le genera `python tools/screenshots.py`, sui PDF di p
    git tag v0.1.0
    git push origin v0.1.0
    ```
-3. Il workflow "Release" costruisce l'exe su Windows, lo prova, lo fa firmare da SignPath (vedi [firma-codice.md](firma-codice.md)) e crea la Release con lo zip allegato. Se il tag non corrisponde a `__version__` si ferma con un errore.
+3. Il workflow "Release" costruisce l'exe su Windows, lo prova e crea la Release con lo zip allegato, anche con il nome fisso `PieDF-win64.zip` per il link diretto all'ultima versione (`https://github.com/dellaluca/PieDF/releases/latest/download/PieDF-win64.zip`). Se il tag non corrisponde a `__version__` si ferma con un errore.
