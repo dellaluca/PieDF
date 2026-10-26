@@ -10,6 +10,7 @@ Uscita 1 se qualcosa fallisce. È il comando unico per i worker: niente catene d
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -18,18 +19,34 @@ ROOT = TESTS.parent
 TIMEOUT = 600
 
 
+def kill_tree(p: subprocess.Popen) -> None:
+    """Chiude il controllo e i processi figli (render, stampa, miniature)."""
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"], capture_output=True)
+    else:
+        try:
+            os.killpg(p.pid, 9)
+        except ProcessLookupError:
+            pass
+    p.wait()
+
+
 def run(cmd: list[str]) -> tuple[int, str]:
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
-    try:
-        p = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=TIMEOUT)
-        return p.returncode, p.stdout + p.stderr
-    except subprocess.TimeoutExpired as e:
-        out = (e.stdout or "") + (e.stderr or "")
-        if isinstance(out, bytes):
-            out = out.decode("utf-8", "replace")
-        return 124, out + f"\nTIMEOUT dopo {TIMEOUT} s"
+    # Uscita su file, non su pipe: un processo figlio rimasto orfano terrebbe aperta la pipe
+    # e l'attesa non finirebbe mai, nemmeno dopo il timeout.
+    with tempfile.TemporaryFile() as log:
+        p = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT,
+                             start_new_session=sys.platform != "win32")
+        try:
+            code = p.wait(timeout=TIMEOUT)
+            suffix = ""
+        except subprocess.TimeoutExpired:
+            kill_tree(p)
+            code, suffix = 124, f"\nTIMEOUT dopo {TIMEOUT} s"
+        log.seek(0)
+        return code, log.read().decode("utf-8", "replace") + suffix
 
 
 def main() -> int:
