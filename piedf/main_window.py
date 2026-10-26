@@ -56,6 +56,7 @@ from piedf.positions import Positions
 from piedf.printing import NO_PRINT_MESSAGE, PrintJob, PrintOptions, PrintOptionsDialog, can_print, print_source, selected_pages
 from piedf.renderer import Renderer
 from piedf.search_bar import SearchBar
+from piedf.sidebar import PAGES_TAB, TOC_TAB, Sidebar
 from piedf.signature_dialog import SignatureDialog
 from piedf.signature_manager import SignatureManager, thumbnail_pixmap
 from piedf.signatures import Kind, Signature, SignatureStore
@@ -77,6 +78,7 @@ ALIGN_LABELS = ["Sinistra", "Centro", "Destra"]
 FORM_MESSAGE = "Questo documento contiene campi compilabili."
 XFA_MESSAGE = "Questo modulo usa una tecnologia (XFA) che PieDF non supporta: i campi non si possono compilare."
 MAX_HISTORY = 50
+SIDEBAR_WIDTH = 220  # px logici, larghezza del pannello laterale la prima volta
 SAVE_FIRST = "Salva o scarta le modifiche prima di organizzare le pagine."
 # Gli unici link esterni che si seguono: niente file:, launch, javascript: o altri PDF.
 SAFE_SCHEMES = ("http", "https", "mailto")
@@ -157,6 +159,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.view)
         self.setCentralWidget(central)
 
+        self.sidebar = Sidebar(self._renderer, self)
+        self.sidebar.page_clicked.connect(self._go_to_thumbnail)
+        self.sidebar.toc_clicked.connect(lambda page, y: self._follow_link(page, self.view.view_y(page, y)))
+        self.view.rotation_changed.connect(self._on_rotation_changed)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.sidebar)
+
         # Se il programma si blocca, la posizione di lettura si perde al massimo per questo intervallo.
         self._position_timer = QTimer(self)
         self._position_timer.timeout.connect(lambda: self._save_position(force=False))
@@ -166,6 +174,7 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._build_toolbar()
         self._build_text_bar()
+        self._restore_sidebar()
         self._update_title()
         self._update_enabled()
 
@@ -229,6 +238,11 @@ class MainWindow(QMainWindow):
         self.act_merge = self._action("&Unisci PDF…", self.merge_files)
         self.act_rotate_left = self._action("Ruota pagina corrente a &sinistra", lambda: self.rotate_current(-90))
         self.act_rotate_right = self._action("Ruota pagina corrente a &destra", lambda: self.rotate_current(90))
+        # Solo a schermo: il file non cambia (al contrario di "Ruota pagina corrente").
+        self.act_view_right = self._action("&Ruota vista a destra", lambda: self.view.rotate_view(90), ["Ctrl+Shift++"])
+        self.act_view_left = self._action("Ruota vista a s&inistra", lambda: self.view.rotate_view(-90), ["Ctrl+Shift+-"])
+        self.act_sidebar = self._action("Pannello &laterale", self._set_sidebar, ["F4"])
+        self.act_sidebar.setCheckable(True)
 
         # Il testo segue l'ultimo comando: "Annulla spostamento firma".
         stack = self.placements.undo_stack
@@ -247,6 +261,7 @@ class MainWindow(QMainWindow):
             self.act_text, self.act_date, self.act_organize, self.act_rotate_left, self.act_rotate_right,
             self.act_find, self.act_find_next, self.act_find_prev,
             self.act_draw, *self.draw_actions.values(), self.act_copy, self.act_select_all,
+            self.act_view_right, self.act_view_left,
         ]
 
     def _build_menu(self) -> None:
@@ -276,11 +291,16 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.act_find_prev)
 
         view_menu = self.menuBar().addMenu("&Visualizza")
+        view_menu.addAction(self.act_sidebar)
+        view_menu.addSeparator()
         for action in (self.act_zoom_in, self.act_zoom_out, self.act_actual):
             view_menu.addAction(action)
         view_menu.addSeparator()
         view_menu.addAction(self.act_fit_page)
         view_menu.addAction(self.act_fit_width)
+        view_menu.addSeparator()
+        view_menu.addAction(self.act_view_right)
+        view_menu.addAction(self.act_view_left)
         view_menu.addSeparator()
         for action in (self.act_prev, self.act_next, self.act_goto):
             view_menu.addAction(action)
@@ -445,6 +465,7 @@ class MainWindow(QMainWindow):
             self.set_draw_tool(self.view.draw_style["tool"])
 
     def _on_draw_tool_changed(self, tool) -> None:
+        self._update_enabled()
         self.act_draw.setChecked(tool is not None)
         for name, action in self.draw_actions.items():
             action.setChecked(name == tool)
@@ -611,6 +632,12 @@ class MainWindow(QMainWindow):
         self.act_save.setEnabled(has_doc and self.modified)
         self.act_back.setEnabled(has_doc and bool(self._back))
         self.act_forward.setEnabled(has_doc and bool(self._forward))
+        # La vista si ruota solo senza firme, campi, caselle o tratti da salvare e senza strumenti
+        # attivi: con la vista ruotata il documento si legge soltanto. Raddrizzarla si può sempre.
+        tool = self.view.placing or self.view.text_tool or self.view.draw_tool is not None
+        can_rotate = has_doc and (self.view.rotation != 0 or not (self.placements.modified or tool))
+        self.act_view_right.setEnabled(can_rotate)
+        self.act_view_left.setEnabled(can_rotate)
 
     @property
     def modified(self) -> bool:
@@ -689,6 +716,8 @@ class MainWindow(QMainWindow):
         self._original = original
         self._renderer.open(self._gen, path, doc.password)
         self.view.set_document(self._gen, doc.page_sizes)
+        self.sidebar.set_document(self._gen, doc.page_sizes, doc.toc)
+        self.sidebar.set_current(self.view.current_page)
         self.forms.set_fields(doc.fields)
         self.annotations.set_items(doc.annotations)
         self._update_form_bar(doc)
@@ -713,6 +742,7 @@ class MainWindow(QMainWindow):
         self._renderer.close(self._gen)
         self._remove_temps()
         self.view.clear()
+        self.sidebar.clear()
         self.forms.set_fields([])
         self.annotations.set_items([])
         self._update_form_bar(None)
@@ -1179,6 +1209,51 @@ class MainWindow(QMainWindow):
         self._page_box.blockSignals(True)
         self._page_box.setValue(index + 1)
         self._page_box.blockSignals(False)
+        self.sidebar.set_current(index)
+
+    def _go_to_thumbnail(self, index: int) -> None:
+        self.view.go_to_page(index)
+        self.view.setFocus()
+
+    def _on_rotation_changed(self, rotation: int) -> None:
+        self.sidebar.set_rotation(rotation)
+        self._update_enabled()
+
+    # --- Pannello laterale ------------------------------------------------------------
+
+    def _restore_sidebar(self) -> None:
+        """Visibile, larghezza e scheda come l'ultima volta (settings.ini, `sidebar/…`)."""
+        s = self._settings
+        visible = s.value("sidebar/visible", False, type=bool)
+        tab = s.value("sidebar/tab", PAGES_TAB, type=int)
+        self.sidebar.tabs.setCurrentIndex(tab if tab in (PAGES_TAB, TOC_TAB) else PAGES_TAB)
+        self.sidebar.tabs.currentChanged.connect(lambda i: self._settings.setValue("sidebar/tab", i))
+        self.act_sidebar.setChecked(visible)
+        self.sidebar.setVisible(visible)
+        self._apply_sidebar_width()
+
+    def _apply_sidebar_width(self) -> None:
+        width = self._settings.value("sidebar/width", SIDEBAR_WIDTH, type=int)
+        width = max(self.sidebar.minimumSizeHint().width(), min(width, max(self.width() // 2, 1)))
+        self.resizeDocks([self.sidebar], [width], Qt.Orientation.Horizontal)
+
+    def _set_sidebar(self, visible: bool) -> None:
+        if not visible:
+            self._save_sidebar_width()
+        self.act_sidebar.setChecked(visible)
+        self.sidebar.setVisible(visible)
+        if visible:
+            self._apply_sidebar_width()
+        self._settings.setValue("sidebar/visible", visible)
+
+    def _save_sidebar_width(self) -> None:
+        if self.sidebar.isVisible():
+            self._settings.setValue("sidebar/width", self.sidebar.width())
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not event.spontaneous() and self.sidebar.isVisible():
+            self._apply_sidebar_width()  # prima di mostrarsi la finestra non ha ancora la sua misura
 
     def _focus_page_box(self) -> None:
         self._page_box.setFocus()
@@ -1249,12 +1324,14 @@ class MainWindow(QMainWindow):
             menu.addAction("Gestisci firme…", self.manage_signatures)
 
     def _on_placing_changed(self, placing: bool) -> None:
+        self._update_enabled()
         if placing:
             self.statusBar().showMessage(PLACING_HINT)
         elif self.statusBar().currentMessage() == PLACING_HINT:
             self.statusBar().clearMessage()
 
     def _on_text_tool_changed(self, active: bool) -> None:
+        self._update_enabled()
         if active:
             self.statusBar().showMessage(DATE_HINT if self.view.date_tool else TEXT_HINT)
         elif self.statusBar().currentMessage() in (TEXT_HINT, DATE_HINT):
@@ -1297,6 +1374,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self._save_position()
+        self._save_sidebar_width()
         if self._print_job is not None:
             self._print_job.cancel()
             self._print_job.wait()

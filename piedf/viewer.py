@@ -16,6 +16,7 @@ from PySide6.QtGui import (
     QPixmap,
     QPolygonF,
     QTextOption,
+    QTransform,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
@@ -117,12 +118,13 @@ class PdfView(QAbstractScrollArea):
     page_changed = Signal(int)  # indice da 0
     zoom_changed = Signal(float, FitMode)
     placing_changed = Signal(bool)  # entrata/uscita dalla modalità posizionamento
-    link_goto = Signal(int, float)  # clic su un link interno: pagina, y in punti
+    link_goto = Signal(int, float)  # clic su un link interno: pagina, y in punti come in `set_scroll_position`
     link_uri = Signal(str)  # clic su un link esterno, ancora da validare
     text_tool_changed = Signal(bool)  # entrata/uscita dalla modalità Testo o Data
     # Casella selezionata o in modifica (None se nessuna), anche quando cambia il suo formato.
     text_box_changed = Signal(object)
     draw_tool_changed = Signal(object)  # strumento di disegno attivo (PEN, HIGHLIGHTER, ERASER) o None
+    rotation_changed = Signal(int)  # rotazione della vista (solo a schermo): 0, 90, 180, 270
 
     def __init__(self, renderer: Renderer, parent=None) -> None:
         super().__init__(parent)
@@ -145,6 +147,11 @@ class PdfView(QAbstractScrollArea):
         self._content_w = 0
         self._content_h = 0
         self._current = 0
+        # Rotazione della vista (#6), in senso orario: solo a schermo, i modelli restano nello
+        # spazio della pagina come si vede. Le immagini della cache restano dritte: quelle ruotate
+        # si tengono solo per le pagine visibili (pagina → (immagine dritta, rotazione, ruotata)).
+        self._rotation = 0
+        self._rotated: dict[int, tuple[QImage, int, QImage]] = {}
         self._cache: OrderedDict[int, tuple[float, QImage]] = OrderedDict()
         self._cache_bytes = 0
         self._last_request: list[tuple[int, float]] | None = None
@@ -233,6 +240,58 @@ class PdfView(QAbstractScrollArea):
     @property
     def fit_mode(self) -> FitMode:
         return self._fit
+
+    @property
+    def rotation(self) -> int:
+        return self._rotation
+
+    def shown_size(self, index: int) -> tuple[float, float]:
+        """Dimensione della pagina a schermo (punti), con la rotazione della vista."""
+        w, h = self._sizes[index]
+        return (h, w) if self._rotation % 180 else (w, h)
+
+    def set_rotation(self, rotation: int) -> None:
+        """Ruota la vista (solo a schermo), tenendo in cima la stessa parte della pagina."""
+        rotation %= 360
+        if rotation == self._rotation:
+            return
+        if not self._sizes:
+            self._rotation = rotation
+            self.rotation_changed.emit(rotation)
+            return
+        self._close_editor(commit=True)
+        if rotation:
+            # Con la vista ruotata il documento si legge soltanto: niente strumenti né selezioni.
+            self.cancel_placing()
+            self.cancel_text_tool()
+            self.cancel_draw_tool()
+            self._placements.select(None)
+            self._annotations.select(None)
+        page, y_pt = self.scroll_position()
+        fraction = y_pt / max(self.shown_size(page)[1], 1)
+        self._rotation = rotation
+        self._rotated.clear()
+        self._drag = self._box_drag = self._ink_drag = None
+        self._link_press = self._text_press = None
+        self._focus_field = None
+        if self._fit != FitMode.NONE:
+            self._apply_fit()
+        else:
+            self._relayout()
+        self.set_scroll_position(page, fraction * self.shown_size(page)[1])
+        self.zoom_changed.emit(self._zoom, self._fit)
+        self.viewport().update()
+        self.rotation_changed.emit(rotation)
+
+    def rotate_view(self, delta: int) -> None:
+        self.set_rotation(self._rotation + delta)
+
+    def view_y(self, index: int, y_pt: float | None) -> float:
+        """y nella pagina (destinazione di un link, voce dell'indice) → y per `set_scroll_position`.
+        Con la vista ruotata di 90° la y della pagina va in orizzontale: si va in cima."""
+        if y_pt is None or not 0 <= index < len(self._sizes) or self._rotation % 180:
+            return 0.0
+        return self._sizes[index][1] - y_pt if self._rotation == 180 else y_pt
 
     @property
     def placing(self) -> bool:
@@ -372,6 +431,7 @@ class PdfView(QAbstractScrollArea):
         """Modalità posizionamento: l'anteprima segue il cursore, un clic la piazza."""
         if not self._sizes:
             return
+        self.set_rotation(0)  # gli strumenti lavorano solo con la vista dritta
         self._close_editor(commit=True)
         self.cancel_text_tool()
         self.cancel_draw_tool()
@@ -398,6 +458,7 @@ class PdfView(QAbstractScrollArea):
         """Modalità Testo (o Data con `date`): un clic sulla pagina mette una casella."""
         if not self._sizes:
             return
+        self.set_rotation(0)
         self._close_editor(commit=True)
         self.cancel_placing()
         self.cancel_draw_tool()
@@ -420,6 +481,7 @@ class PdfView(QAbstractScrollArea):
         """Penna, evidenziatore o gomma: resta attivo per più tratti, finché Esc o `cancel_draw_tool`."""
         if not self._sizes:
             return
+        self.set_rotation(0)
         self._close_editor(commit=True)
         self.cancel_placing()
         self.cancel_text_tool()
@@ -477,13 +539,17 @@ class PdfView(QAbstractScrollArea):
         pos = QPointF(pos)
         rect = self._page_rect(index)
         s = self._scale()
-        return QPointF(
-            (pos.x() + self.horizontalScrollBar().value() - rect.x()) / s,
-            (pos.y() + self.verticalScrollBar().value() - rect.y()) / s,
-        )
+        x = (pos.x() + self.horizontalScrollBar().value() - rect.x()) / s
+        y = (pos.y() + self.verticalScrollBar().value() - rect.y()) / s
+        if self._rotation:
+            w, h = self._sizes[index]
+            x, y = {90: (y, h - x), 180: (w - x, h - y), 270: (w - y, x)}[self._rotation]
+        return QPointF(x, y)
 
     def page_rect_to_viewport(self, index: int, rect_pt: QRectF) -> QRectF:
         """Rettangolo in punti PDF della pagina `index` → coordinate della vista (px logici)."""
+        if self._rotation:
+            return self._page_transform(index).mapRect(rect_pt)
         page = self._page_rect(index)
         s = self._scale()
         return QRectF(
@@ -509,6 +575,7 @@ class PdfView(QAbstractScrollArea):
         self._search_hits, self._search_current = {}, None
         self._gen = gen
         self._sizes = page_sizes
+        self._reset_rotation()
         self._clear_cache()
         self._current = -1
         # Ogni documento si apre adattato alla larghezza, come in Acrobat.
@@ -532,6 +599,7 @@ class PdfView(QAbstractScrollArea):
         self._search_hits, self._search_current = {}, None
         self._gen += 1
         self._sizes = []
+        self._reset_rotation()
         self._clear_cache()
         self._relayout()
         self.viewport().update()
@@ -586,12 +654,45 @@ class PdfView(QAbstractScrollArea):
     def _scale(self) -> float:
         return self._zoom * POINTS_TO_PX
 
+    def _reset_rotation(self) -> None:
+        """Un documento nuovo si apre con la vista dritta (la rotazione della vista non si salva)."""
+        self._rotated.clear()
+        if self._rotation:
+            self._rotation = 0
+            self.rotation_changed.emit(0)
+
+    def _page_transform(self, index: int) -> QTransform:
+        """Punti PDF della pagina `index` → coordinate della vista (px logici), rotazione compresa."""
+        rect = self._page_rect(index)
+        s = self._scale()
+        w, h = self._sizes[index]
+        # Qt: x' = m11·x + m21·y + dx, y' = m12·x + m22·y + dy; prima la rotazione, poi la scala.
+        rotate = {
+            0: QTransform(),
+            90: QTransform(0, 1, -1, 0, h, 0),
+            180: QTransform(-1, 0, 0, -1, w, h),
+            270: QTransform(0, -1, 1, 0, 0, w),
+        }[self._rotation]
+        x, y = rect.x() - self.horizontalScrollBar().value(), rect.y() - self.verticalScrollBar().value()
+        return rotate * QTransform(s, 0, 0, s, x, y)
+
+    def _shown_image(self, page: int, image: QImage) -> QImage:
+        """L'immagine della pagina con la rotazione della vista (ruotata una volta sola)."""
+        if not self._rotation:
+            return image
+        cached = self._rotated.get(page)
+        if cached is None or cached[0] is not image or cached[1] != self._rotation:
+            cached = (image, self._rotation, image.transformed(QTransform().rotate(self._rotation)))
+            self._rotated[page] = cached
+        return cached[2]
+
     def _relayout(self) -> None:
         s = self._scale()
         self._tops = []
         y = MARGIN
         max_w = 0
-        for w, h in self._sizes:
+        for i in range(len(self._sizes)):
+            w, h = self.shown_size(i)
             self._tops.append(y)
             y += round(h * s) + MARGIN
             max_w = max(max_w, round(w * s))
@@ -611,7 +712,7 @@ class PdfView(QAbstractScrollArea):
     def _page_rect(self, index: int) -> QRect:
         """Rettangolo della pagina in coordinate del contenuto (px logici)."""
         s = self._scale()
-        w, h = self._sizes[index]
+        w, h = self.shown_size(index)
         pw, ph = round(w * s), round(h * s)
         x = (max(self._content_w, self.viewport().width()) - pw) // 2
         return QRect(x, self._tops[index], pw, ph)
@@ -627,10 +728,10 @@ class PdfView(QAbstractScrollArea):
 
     def _fit_zoom(self, mode: FitMode) -> float:
         avail_w = self.viewport().width() - 2 * MARGIN
-        max_w = max(w for w, _ in self._sizes)
+        max_w = max(self.shown_size(i)[0] for i in range(len(self._sizes)))
         zoom = avail_w / (max_w * POINTS_TO_PX)
         if mode == FitMode.PAGE:
-            _, h = self._sizes[max(self._current, 0)]
+            _, h = self.shown_size(max(self._current, 0))
             avail_h = self.viewport().height() - 2 * MARGIN
             zoom = min(zoom, avail_h / (h * POINTS_TO_PX))
         return zoom
@@ -772,7 +873,10 @@ class PdfView(QAbstractScrollArea):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         offset = QPoint(self.horizontalScrollBar().value(), self.verticalScrollBar().value())
         dpr = self.devicePixelRatioF()
-        for page in self._visible_range():
+        visible = self._visible_range()
+        for page in [p for p in self._rotated if p not in visible]:
+            del self._rotated[page]
+        for page in visible:
             rect = self._page_rect(page).translated(-offset)
             painter.fillRect(rect.adjusted(-1, -1, 1, 1), PAGE_BORDER)
             painter.fillRect(rect, Qt.GlobalColor.white)
@@ -781,6 +885,7 @@ class PdfView(QAbstractScrollArea):
                 continue
             self._cache.move_to_end(page)
             scale, image = cached
+            image = self._shown_image(page, image)
             if scale == round(self._scale() * dpr, 4):
                 # Scala esatta: pixel 1:1 per un testo nitido.
                 image.setDevicePixelRatio(dpr)
@@ -962,8 +1067,7 @@ class PdfView(QAbstractScrollArea):
         visible = self._visible_range()
         for placement in self._placements.items:
             if placement.page in visible:
-                target = self.page_rect_to_viewport(placement.page, placement.rect)
-                painter.drawImage(target, self._placements.image(placement.image_path))
+                self._draw_on_page(painter, placement.page, placement.rect, self._placements.image(placement.image_path))
 
         selected = self._placements.selected
         if selected is not None and selected.page in visible:
@@ -982,11 +1086,23 @@ class PdfView(QAbstractScrollArea):
         if preview is not None:
             page, rect = preview
             painter.setOpacity(PREVIEW_OPACITY)
-            painter.drawImage(self.page_rect_to_viewport(page, rect), self._placements.image(self._placing.path))
+            self._draw_on_page(painter, page, rect, self._placements.image(self._placing.path))
             painter.setOpacity(1.0)
+
+    def _draw_on_page(self, painter: QPainter, page: int, rect_pt: QRectF, image: QImage) -> None:
+        """Immagine nel rettangolo (punti PDF) della pagina, ruotata con la vista."""
+        if not self._rotation:
+            painter.drawImage(self.page_rect_to_viewport(page, rect_pt), image)
+            return
+        painter.save()
+        painter.setTransform(self._page_transform(page), True)
+        painter.drawImage(QRectF(rect_pt), image)
+        painter.restore()
 
     def _hit(self, pos: QPointF) -> tuple[Placement | None, int | None]:
         """Firma sotto il punto e, se è la selezionata, l'angolo della maniglia (0-3)."""
+        if self._rotation:
+            return None, None  # con la vista ruotata il documento si legge soltanto
         selected = self._placements.selected
         if selected is not None and selected.page in self._visible_range():
             rect = self.page_rect_to_viewport(selected.page, selected.rect)
@@ -1320,7 +1436,7 @@ class PdfView(QAbstractScrollArea):
 
     def _activate(self, link: PageLink) -> None:
         if link.kind == "goto":
-            self.link_goto.emit(link.page, link.y or 0.0)
+            self.link_goto.emit(link.page, self.view_y(link.page, link.y))
         else:
             self.link_uri.emit(link.uri)
 
@@ -1372,14 +1488,15 @@ class PdfView(QAbstractScrollArea):
         """Posizione nel testo più vicina al punto della vista, anche tra le pagine o fuori dalla vista."""
         y = pos.y() + self.verticalScrollBar().value()
         page = max(0, min(bisect.bisect_right(self._tops, y) - 1, len(self._sizes) - 1))
-        if y > self._page_rect(page).bottom():
+        rect = self._page_rect(page)
+        if y > rect.bottom():
             return page, END  # nel margine sotto la pagina
         pt = self.to_page_point(page, pos)
         text = self._words.get(page)
         if text is None:
             self._request_words(page)
-            return page, 0 if pt.y() < self._sizes[page][1] / 2 else END
-        if pt.y() < 0:
+            return page, 0 if y < rect.center().y() else END
+        if y < rect.top():
             return page, 0
         return page, text.caret_at(pt.x(), pt.y())
 
@@ -1486,6 +1603,8 @@ class PdfView(QAbstractScrollArea):
 
     def _field_at(self, pos: QPointF) -> FormField | None:
         """Campo compilabile sotto il punto della vista (i campi firma e i pulsanti non contano)."""
+        if self._rotation:
+            return None
         for page in self._visible_range():
             for f in self._forms.on_page(page):
                 if f.fillable and self.page_rect_to_viewport(page, self._field_rect(f)).contains(pos):
@@ -1542,7 +1661,7 @@ class PdfView(QAbstractScrollArea):
         return True
 
     def focusNextPrevChild(self, next: bool) -> bool:
-        if self._placing is None and self._sizes and self._move_focus(next):
+        if self._placing is None and self._sizes and not self._rotation and self._move_focus(next):
             return True
         return super().focusNextPrevChild(next)
 
@@ -1733,6 +1852,8 @@ class PdfView(QAbstractScrollArea):
 
     def _hit_box(self, pos: QPointF) -> tuple[TextBox | None, int | None]:
         """Casella sotto il punto e, se è la selezionata, il lato della maniglia (0 sinistra, 1 destra)."""
+        if self._rotation:
+            return None, None
         visible = self._visible_range()
         selected = self._annotations.selected
         if isinstance(selected, TextBox) and selected.page in visible:
@@ -1764,8 +1885,11 @@ class PdfView(QAbstractScrollArea):
             if isinstance(item, Ink) and item.page in visible:
                 self._paint_ink(painter, item)
             elif isinstance(item, TextBox) and item.page in visible and item is not self._editing_box:
-                target = self.page_rect_to_viewport(item.page, to_qrect(item.rect))
                 image = self._annotations.image(item, scale)
+                if self._rotation:
+                    self._draw_on_page(painter, item.page, to_qrect(item.rect), image)
+                    continue
+                target = self.page_rect_to_viewport(item.page, to_qrect(item.rect))
                 image.setDevicePixelRatio(dpr)
                 painter.drawImage(target.topLeft(), image)
         self._paint_stroke(painter)
@@ -1894,7 +2018,7 @@ class PdfView(QAbstractScrollArea):
     def _ink_at(self, pos: QPointF) -> Ink | None:
         """Tratto di PieDF sotto il punto della vista (quelli di altri programmi non contano)."""
         page = self.page_at(pos)
-        if page is None:
+        if page is None or self._rotation:
             return None
         pt = self.to_page_point(page, pos)
         return self._annotations.ink_at(page, (pt.x(), pt.y()), INK_HIT_PX / self._scale())
@@ -1966,9 +2090,7 @@ class PdfView(QAbstractScrollArea):
 
     def _ink_transform(self, painter: QPainter, page: int) -> None:
         """Il painter disegna in punti PDF della pagina."""
-        rect = self._page_rect(page)
-        painter.translate(rect.x() - self.horizontalScrollBar().value(), rect.y() - self.verticalScrollBar().value())
-        painter.scale(self._scale(), self._scale())
+        painter.setTransform(self._page_transform(page), True)
 
     def _ink_pen(self, color: str, width: float, opacity: float) -> QPen:
         # Opacità nel colore: ogni tratto si dipinge una volta sola, anche dove si sovrappone a sé

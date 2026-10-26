@@ -7,6 +7,8 @@ non importa Qt, così il processo figlio parte in fretta.
 Messaggi in ingresso:
     ("open", gen, path, password)        path None chiude il documento
     ("want", gen, [(page, scale), ...])   sostituisce la lista precedente
+    ("thumbs", gen, [(page, scale), ...]) miniature del pannello laterale: come "want", ma
+                                          solo quando non ci sono pagine della vista da disegnare
     ("links", gen, page)                  link della pagina, risposta subito
     ("words", gen, page)                  parole della pagina (selezione del testo), risposta subito
     ("field", gen, page, xref, value)     valore di un campo modulo, solo nel documento in memoria
@@ -15,6 +17,7 @@ Messaggi in ingresso:
     ("quit",)
 Messaggi in uscita:
     ("page", gen, page, scale, width, height, stride, samples_rgb)
+    ("thumb", gen, page, width, height, stride, samples_rgb)
     ("links", gen, page, [{kind, rect, page, to, uri}, ...])
     ("words", gen, page, [(x0, y0, x1, y1, parola, blocco, riga, n), ...])
     ("error", gen, message)
@@ -31,6 +34,9 @@ così com'è, anche file:, launch e link ad altri PDF; decide la GUI cosa seguir
 Parole (#15): rettangoli nello stesso spazio, nell'ordine di lettura di
 `get_text("words", sort=True)` ma calcolato dopo /Rotate (MuPDF dà le parole, e le ordina,
 nella pagina non ruotata). Una pagina senza testo (scansione) ha la lista vuota.
+
+Miniature (#6): hanno la precedenza solo sulla ricerca; come le pagine della vista sono senza
+le annotazioni di PieDF.
 
 Ricerca (#14): una pagina alla volta, e solo quando non ci sono pagine da disegnare: il
 render delle pagine visibili ha sempre la precedenza. `search_for` di MuPDF ignora le
@@ -64,20 +70,21 @@ def run(requests, results) -> None:
     doc = None
     gen = 0
     wanted: list[tuple[int, float]] = []
+    thumbs: list[tuple[int, float]] = []  # miniature del pannello laterale, dopo le pagine
     cleaned: set[int] = set()  # pagine già senza le annotazioni di PieDF
     search = None  # ricerca in corso: [id, testo, maiuscole, pagine da cercare, testo trovato]
 
     while True:
         # Senza lavoro si aspetta; altrimenti si leggono solo i messaggi già arrivati,
         # così le richieste vecchie (scroll veloce, zoom) vengono scartate.
-        msg = _get(requests) if not wanted and search is None else _get_nowait(requests)
+        msg = _get(requests) if not wanted and not thumbs and search is None else _get_nowait(requests)
         while msg is not None:
             kind = msg[0]
             if kind == "quit":
                 return
             if kind == "open":
                 _, gen, path, password = msg
-                wanted = []
+                wanted, thumbs = [], []
                 cleaned = set()
                 search = None
                 if doc is not None:
@@ -103,6 +110,8 @@ def run(requests, results) -> None:
                     search = [sid, text, case, list(range(start, n)) + list(range(start)), False]
             elif kind == "want" and msg[1] == gen:
                 wanted = list(msg[2])
+            elif kind == "thumbs" and msg[1] == gen:
+                thumbs = list(msg[2])
             elif kind == "field" and msg[1] == gen and doc is not None:
                 _, _, page, xref, value = msg
                 try:
@@ -127,7 +136,15 @@ def run(requests, results) -> None:
             msg = _get_nowait(requests)
 
         if doc is None:
-            wanted, search = [], None
+            wanted, thumbs, search = [], [], None
+            continue
+        if not wanted and thumbs:
+            page, scale = thumbs.pop(0)
+            try:
+                pix = _render(doc, page, scale, cleaned)
+                results.put(("thumb", gen, page, pix.width, pix.height, pix.stride, pix.samples))
+            except Exception as e:
+                results.put(("error", gen, f"Miniatura di pagina {page + 1}: {e}"))
             continue
         if not wanted:
             if search is not None:
@@ -147,13 +164,20 @@ def run(requests, results) -> None:
 
         page, scale = wanted.pop(0)
         try:
-            if page not in cleaned:
-                _remove_piedf_annots(doc[page])
-                cleaned.add(page)
-            pix = doc[page].get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
+            pix = _render(doc, page, scale, cleaned)
             results.put(("page", gen, page, scale, pix.width, pix.height, pix.stride, pix.samples))
         except Exception as e:
             results.put(("error", gen, f"Pagina {page + 1}: {e}"))
+
+
+def _render(doc, page: int, scale: float, cleaned: set[int]):
+    """Pagina senza le annotazioni di PieDF (le disegna la vista dal suo modello)."""
+    import pymupdf
+
+    if page not in cleaned:
+        _remove_piedf_annots(doc[page])
+        cleaned.add(page)
+    return doc[page].get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
 
 
 # Pagine per la stampa già pronte e non ancora confermate dalla GUI: a 600 dpi un A4 occupa

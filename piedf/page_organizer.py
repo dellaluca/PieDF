@@ -206,6 +206,16 @@ class PageModel(QAbstractListModel):
                 index = self.index(row)
                 self.dataChanged.emit(index, index)
 
+    def drop_thumb(self, source: int, page: int) -> None:
+        """La miniatura è vecchia: si richiede (la cella resta bianca finché arriva)."""
+        self.thumbs.pop((source, page), None)
+        for rot in (0, 90, 180, 270):
+            self._rotated.pop((source, page, rot), None)
+
+    def clear_thumbs(self) -> None:
+        self.thumbs.clear()
+        self._rotated.clear()
+
     def set_refs(self, refs: list[PageRef]) -> None:
         self.beginResetModel()
         self.refs = list(refs)
@@ -213,13 +223,18 @@ class PageModel(QAbstractListModel):
 
 
 class PageDelegate(QStyledItemDelegate):
-    def __init__(self, model: PageModel, on_missing, parent=None) -> None:
+    """Cella di una pagina: miniatura (lato massimo `thumb` px) e numero sotto. La usa anche il
+    pannello laterale (#6)."""
+
+    def __init__(self, model: PageModel, on_missing, parent=None, thumb: int = THUMB) -> None:
         super().__init__(parent)
         self._model = model
         self._on_missing = on_missing
+        self._thumb = thumb
+        self._cell = QSize(thumb + 30, thumb + 36)
 
     def sizeHint(self, option, index) -> QSize:
-        return CELL
+        return self._cell
 
     def paint(self, painter: QPainter, option, index: QModelIndex) -> None:
         ref = self._model.refs[index.row()]
@@ -230,11 +245,12 @@ class PageDelegate(QStyledItemDelegate):
             color = QColor(option.palette.highlight().color())
             color.setAlpha(70)
             painter.fillRect(rect.adjusted(2, 2, -2, -2), color)
+        thumb = self._thumb
         w, h = ref.shown_size
-        k = THUMB / max(w, h, 1)
+        k = thumb / max(w, h, 1)
         tw, th = max(1, round(w * k)), max(1, round(h * k))
-        area = QRect(rect.x() + (rect.width() - THUMB) // 2, rect.y() + 8, THUMB, THUMB)
-        page = QRect(area.x() + (THUMB - tw) // 2, area.y() + (THUMB - th) // 2, tw, th)
+        area = QRect(rect.x() + (rect.width() - thumb) // 2, rect.y() + 8, thumb, thumb)
+        page = QRect(area.x() + (thumb - tw) // 2, area.y() + (thumb - th) // 2, tw, th)
         painter.fillRect(page, Qt.GlobalColor.white)
         pix = self._model.pixmap(ref) if ref.source != BLANK else None
         if pix is not None:
