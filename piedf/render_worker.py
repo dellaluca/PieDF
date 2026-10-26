@@ -8,11 +8,13 @@ Messaggi in ingresso:
     ("open", gen, path, password)        path None chiude il documento
     ("want", gen, [(page, scale), ...])   sostituisce la lista precedente
     ("links", gen, page)                  link della pagina, risposta subito
+    ("words", gen, page)                  parole della pagina (selezione del testo), risposta subito
     ("field", gen, page, xref, value)     valore di un campo modulo, solo nel documento in memoria
     ("quit",)
 Messaggi in uscita:
     ("page", gen, page, scale, width, height, stride, samples_rgb)
     ("links", gen, page, [{kind, rect, page, to, uri}, ...])
+    ("words", gen, page, [(x0, y0, x1, y1, parola, blocco, riga, n), ...])
     ("error", gen, message)
     ("closed", gen)                       documento chiuso: il file non è più aperto qui
     ("field", gen, page)                  campo applicato: i render precedenti della pagina sono vecchi
@@ -21,6 +23,10 @@ Link: `rect` (x0, y0, x1, y1) e `to` (x, y) sono in punti nello spazio della pag
 si vede (dopo /Rotate), come `page.rect`. `kind` è "goto" (interno: `page` e `to`, con
 None per le coordinate che la destinazione non indica) oppure "uri" (esterno: `uri`
 così com'è, anche file:, launch e link ad altri PDF; decide la GUI cosa seguire).
+
+Parole (#15): rettangoli nello stesso spazio, nell'ordine di lettura di
+`get_text("words", sort=True)` ma calcolato dopo /Rotate (MuPDF dà le parole, e le ordina,
+nella pagina non ruotata). Una pagina senza testo (scansione) ha la lista vuota.
 
 Le annotazioni di PieDF (caselle di testo e tratti) le disegna la vista dal suo modello: qui si
 cancellano dal documento in memoria prima del primo render di ogni pagina, così non
@@ -88,6 +94,13 @@ def run(requests, results) -> None:
                 except Exception as e:
                     results.put(("links", gen, page, []))
                     results.put(("error", gen, f"Link di pagina {page + 1}: {e}"))
+            elif kind == "words" and msg[1] == gen and doc is not None:
+                page = msg[2]
+                try:
+                    results.put(("words", gen, page, _words(doc[page])))
+                except Exception as e:
+                    results.put(("words", gen, page, []))
+                    results.put(("error", gen, f"Testo di pagina {page + 1}: {e}"))
             msg = _get_nowait(requests)
 
         if doc is None or not wanted:
@@ -251,6 +264,18 @@ def _links(doc, index: int) -> list[dict]:
             links.append(item)
         link = link.next
     return links
+
+
+def _words(page) -> list[tuple]:
+    import pymupdf
+
+    from piedf.text_selection import reading_order
+
+    words = page.get_text("words")
+    if page.rotation:
+        m = page.rotation_matrix
+        words = [(*(pymupdf.Rect(w[:4]) * m), *w[4:]) for w in words]
+    return reading_order([(float(x0), float(y0), float(x1), float(y1), *rest) for x0, y0, x1, y1, *rest in words])
 
 
 def _coord(v: float) -> float | None:

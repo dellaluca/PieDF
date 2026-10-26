@@ -6,6 +6,8 @@ from PySide6.QtCore import QDate, QEvent, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QIcon, QKeySequence, QPixmap
 from PySide6.QtPrintSupport import QAbstractPrintDialog, QPrintDialog, QPrinter, QPrinterInfo
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
+    QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QProgressDialog,
     QPushButton,
     QSpinBox,
@@ -228,12 +231,14 @@ class MainWindow(QMainWindow):
         self.act_redo.setShortcuts([QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
         self.addAction(self.act_undo)
         self.addAction(self.act_redo)
+        self.act_copy = self._action("&Copia", self.copy_text, [QKeySequence.StandardKey.Copy])
+        self.act_select_all = self._action("Seleziona &tutto", self.select_all_text, [QKeySequence.StandardKey.SelectAll])
 
         self._doc_actions = [
             self.act_save_as, self.act_print, self.act_close, self.act_zoom_in, self.act_zoom_out, self.act_actual,
             self.act_fit_page, self.act_fit_width, self.act_prev, self.act_next, self.act_goto,
             self.act_text, self.act_date, self.act_organize, self.act_rotate_left, self.act_rotate_right,
-            self.act_draw, *self.draw_actions.values(),
+            self.act_draw, *self.draw_actions.values(), self.act_copy, self.act_select_all,
         ]
 
     def _build_menu(self) -> None:
@@ -254,6 +259,9 @@ class MainWindow(QMainWindow):
         edit_menu = self.menuBar().addMenu("&Modifica")
         edit_menu.addAction(self.act_undo)
         edit_menu.addAction(self.act_redo)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.act_copy)
+        edit_menu.addAction(self.act_select_all)
 
         view_menu = self.menuBar().addMenu("&Visualizza")
         for action in (self.act_zoom_in, self.act_zoom_out, self.act_actual):
@@ -723,6 +731,30 @@ class MainWindow(QMainWindow):
         else:
             self.view.set_zoom(entry["zoom"])
         self.view.set_scroll_position(page, y)
+
+    # --- Copia del testo ---------------------------------------------------------------
+
+    def _text_editor(self) -> QLineEdit | QPlainTextEdit | None:
+        """Campo di testo con il focus (editor sul posto, numero di pagina, zoom): Copia e Seleziona
+        tutto valgono per lui. Con le scorciatoie ci pensa già lui; serve per il menu."""
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QAbstractSpinBox, QComboBox)):
+            focus = focus.findChild(QLineEdit)  # il testo sta nel suo QLineEdit (se è modificabile)
+        return focus if isinstance(focus, (QLineEdit, QPlainTextEdit)) else None
+
+    def copy_text(self) -> None:
+        editor = self._text_editor()
+        if editor is not None:
+            editor.copy()
+        elif self.view.editor is None:  # un altro editor (elenco, menu a tendina) non ha testo da copiare
+            self.view.copy_selection()
+
+    def select_all_text(self) -> None:
+        editor = self._text_editor()
+        if editor is not None:
+            editor.selectAll()
+        elif self.view.editor is None:
+            self.view.select_all_text()
 
     # --- Link e cronologia -----------------------------------------------------------
 

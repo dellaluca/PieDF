@@ -4,7 +4,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QElapsedTimer, QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QCursor,
@@ -51,6 +51,7 @@ from piedf.ink import simplify, smooth_points
 from piedf.placements import MIN_HEIGHT, Placement, Placements, clamp_rect, default_rect
 from piedf.renderer import Renderer
 from piedf.signatures import Signature
+from piedf.text_selection import END, PageText, ordered, page_span, selected_text
 
 MARGIN = 12  # px logici intorno e tra le pagine
 POINTS_TO_PX = 96 / 72  # al 100% una pagina ha le sue dimensioni reali sullo schermo
@@ -82,6 +83,8 @@ BOX_FONTS = {
 }
 INK_HIT_PX = 4  # px logici: un clic così vicino a un tratto lo prende (selezione e gomma)
 STROKE_MIN_PX = 2.0  # px logici tra due punti del tratto in corso
+TEXT_SELECTION = QColor(26, 115, 232, 80)  # blu semitrasparente sopra il testo selezionato
+AUTOSCROLL_MS = 30  # trascinando la selezione fuori dalla vista, la vista scorre a questo ritmo
 _CURSORS: dict[str, QCursor] = {}
 
 
@@ -124,6 +127,7 @@ class PdfView(QAbstractScrollArea):
         self._renderer = renderer
         renderer.page_ready.connect(self._on_page_ready)
         renderer.links_ready.connect(self._on_links_ready)
+        renderer.words_ready.connect(self._on_words_ready)
         renderer.field_applied.connect(self._on_field_applied)
 
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
@@ -144,6 +148,8 @@ class PdfView(QAbstractScrollArea):
         self._last_request: list[tuple[int, float]] | None = None
         self._links: dict[int, list[PageLink]] = {}  # pagine i cui link sono già arrivati
         self._links_pending: set[int] = set()
+        self._words: dict[int, PageText] = {}  # pagine le cui parole sono già arrivate
+        self._words_pending: set[int] = set()
 
         self._placements = Placements(self)
         self._placements.changed.connect(self.viewport().update)
@@ -188,6 +194,18 @@ class PdfView(QAbstractScrollArea):
         self._ink_drag: tuple[Ink, dict, QPointF] | None = None
         self._polygons: dict[int, tuple[tuple, list[QPolygonF]]] = {}  # id(tratto) → (punti, poligoni)
         self.draw_style = dict(DEFAULT_DRAW)  # colori e spessore dei prossimi tratti
+
+        # Selezione del testo (#15): (pagina, posizione) di partenza e di arrivo (vedi text_selection),
+        # pressione che diventa selezione trascinando, trascinamento in corso, copia che aspetta
+        # le parole di qualche pagina, ultimo doppio clic (per il triplo).
+        self._selection: tuple[tuple[int, int], tuple[int, int]] | None = None
+        self._text_press: tuple[tuple[int, int], QPointF] | None = None
+        self._selecting = False
+        self._copy_pending = False
+        self._double_click: tuple[QElapsedTimer, QPointF] | None = None
+        self._autoscroll = QTimer(self)
+        self._autoscroll.setInterval(AUTOSCROLL_MS)
+        self._autoscroll.timeout.connect(self._autoscroll_step)
 
     # --- API pubblica -----------------------------------------------------------------
 
@@ -259,6 +277,44 @@ class PdfView(QAbstractScrollArea):
     @property
     def focus_field(self) -> FormField | None:
         return self._focus_field
+
+    @property
+    def selecting_text(self) -> bool:
+        return self._selecting
+
+    def selected_text(self) -> str:
+        """Testo selezionato; vuoto senza selezione o se mancano ancora le parole di qualche pagina."""
+        selection = self._ordered_selection()
+        if selection is None or any(p not in self._words for p in range(selection[0][0], selection[1][0] + 1)):
+            return ""
+        return selected_text(selection, self._words)
+
+    def copy_selection(self) -> None:
+        """Copia il testo selezionato negli appunti (appena arrivano le parole che mancano)."""
+        selection = self._ordered_selection()
+        if selection is None:
+            return
+        missing = [p for p in range(selection[0][0], selection[1][0] + 1) if p not in self._words]
+        if missing:
+            self._copy_pending = True
+            for page in missing:
+                self._request_words(page)
+            return
+        self._copy_pending = False
+        text = selected_text(selection, self._words)
+        if text:
+            QApplication.clipboard().setText(text)
+
+    def select_all_text(self) -> None:
+        """Tutto il testo della pagina corrente (niente, se la pagina non ha testo)."""
+        if not self._sizes:
+            return
+        page = max(self._current, 0)
+        self._request_words(page)
+        self._set_selection(((page, 0), (page, END)))
+
+    def clear_text_selection(self) -> None:
+        self._set_selection(None)
 
     def set_placements(self, placements: Placements) -> None:
         self._placements.changed.disconnect(self.viewport().update)
@@ -442,6 +498,7 @@ class PdfView(QAbstractScrollArea):
         """Richiede di nuovo le pagine mancanti (il processo di render ha riaperto il documento)."""
         self._last_request = None
         self._links_pending.clear()
+        self._words_pending.clear()
         self.viewport().update()
 
     def clear(self) -> None:
@@ -600,11 +657,29 @@ class PdfView(QAbstractScrollArea):
         if items != self._last_request:
             self._last_request = items
             self._renderer.request(self._gen, items)
-        # I link solo per le pagine visibili: servono solo sotto il mouse.
+        # I link e le parole solo per le pagine visibili: servono solo sotto il mouse.
         for page in visible:
             if page not in self._links and page not in self._links_pending:
                 self._links_pending.add(page)
                 self._renderer.request_links(self._gen, page)
+            self._request_words(page)
+
+    def _request_words(self, page: int) -> None:
+        if page not in self._words and page not in self._words_pending:
+            self._words_pending.add(page)
+            self._renderer.request_words(self._gen, page)
+
+    def _on_words_ready(self, gen: int, page: int, words: list) -> None:
+        if gen != self._gen or page >= len(self._sizes):
+            return
+        self._words_pending.discard(page)
+        self._words[page] = PageText(words)
+        if self._copy_pending:
+            self.copy_selection()
+        if self._selection is not None:
+            self.viewport().update()  # una selezione fino a fine pagina ora si vede
+        if self._cursor_pos is not None and not self._busy():
+            self._update_cursor()
 
     def _on_links_ready(self, gen: int, page: int, links: list) -> None:
         if gen != self._gen or page >= len(self._sizes):
@@ -639,7 +714,9 @@ class PdfView(QAbstractScrollArea):
             if key in visible:
                 continue
             self._cache_bytes -= self._cache.pop(key)[1].sizeInBytes()
-            self._links.pop(key, None)  # i link seguono la cache delle immagini
+            self._links.pop(key, None)  # i link e le parole seguono la cache delle immagini
+            if not self._in_selection(key):  # quelle della selezione servono ancora per copiarla
+                self._words.pop(key, None)
 
     def _clear_cache(self) -> None:
         self._cache.clear()
@@ -647,6 +724,8 @@ class PdfView(QAbstractScrollArea):
         self._last_request = None
         self._links.clear()
         self._links_pending.clear()
+        self._words.clear()
+        self._words_pending.clear()
 
     # --- Eventi -----------------------------------------------------------------------
 
@@ -683,6 +762,7 @@ class PdfView(QAbstractScrollArea):
                 # Render vecchio (zoom appena cambiato) o ridotto: si stira finché arriva quello giusto.
                 painter.drawImage(QRectF(rect), image)
         self._paint_fields(painter)
+        self._paint_text_selection(painter)
         self._paint_placements(painter)
         self._paint_annotations(painter)
         painter.end()
@@ -749,6 +829,8 @@ class PdfView(QAbstractScrollArea):
             self.viewport().update()
         elif event.key() == Qt.Key.Key_Escape and selected is not None and self._drag is None:
             self._placements.select(None)
+        elif event.key() == Qt.Key.Key_Escape and self._selection is not None and not self._selecting:
+            self._set_selection(None)
         elif event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and selected is not None and self._drag is None:
             self._placements.remove(selected)
             self._update_cursor()
@@ -812,6 +894,12 @@ class PdfView(QAbstractScrollArea):
         self._link_press = None
         self._space_held = False
         self._pan = None
+        self._selection = None
+        self._text_press = None
+        self._selecting = False
+        self._copy_pending = False
+        self._double_click = None
+        self._autoscroll.stop()
         self.cancel_placing()
         self.cancel_text_tool()
         self.cancel_draw_tool()
@@ -878,8 +966,7 @@ class PdfView(QAbstractScrollArea):
 
     def _update_cursor(self) -> None:
         viewport = self.viewport()
-        busy = self._drag is not None or self._box_drag is not None or self._ink_drag is not None or self._stroke is not None
-        if self._pan is not None or (self._space_held and not busy):
+        if self._pan is not None or (self._space_held and not self._busy()):
             # La manina vince su tutto: lo strumento di prima riprende rilasciando lo Spazio.
             viewport.setCursor(Qt.CursorShape.ClosedHandCursor if self._pan is not None else Qt.CursorShape.OpenHandCursor)
             if viewport.toolTip():
@@ -900,6 +987,8 @@ class PdfView(QAbstractScrollArea):
         elif self._box_drag is not None:
             side = self._box_drag[3]
             viewport.setCursor(Qt.CursorShape.ClosedHandCursor if side is None else Qt.CursorShape.SizeHorCursor)
+        elif self._selecting:
+            viewport.setCursor(Qt.CursorShape.IBeamCursor)
         else:
             placement, corner = self._hit(self._cursor_pos) if self._cursor_pos is not None else (None, None)
             box, side = self._hit_box(self._cursor_pos) if corner is None and self._cursor_pos is not None else (None, None)
@@ -915,6 +1004,10 @@ class PdfView(QAbstractScrollArea):
                 and self._links_active()
             ):
                 link = self.link_at(self._cursor_pos)
+            word = (
+                field is None and placement is None and box is None and ink is None and link is None
+                and self._cursor_pos is not None and self._text_active() and self._word_at(self._cursor_pos) is not None
+            )
             if corner is not None:
                 viewport.setCursor(CORNER_CURSORS[corner])
             elif side is not None:
@@ -928,6 +1021,8 @@ class PdfView(QAbstractScrollArea):
                 viewport.setCursor(Qt.CursorShape.OpenHandCursor)
             elif link is not None:
                 viewport.setCursor(Qt.CursorShape.PointingHandCursor)
+            elif word:
+                viewport.setCursor(Qt.CursorShape.IBeamCursor)
             else:
                 viewport.unsetCursor()
             tooltip = link.tooltip if link is not None else ""
@@ -941,6 +1036,13 @@ class PdfView(QAbstractScrollArea):
             and self._placing is None and self._drag is None and self._placements.selected is None
             and self._text_tool is None and self._box_drag is None and self._editing_box is None
             and self._annotations.selected is None and self._draw_tool is None and self._ink_drag is None
+        )
+
+    def _busy(self) -> bool:
+        """Trascinamento in corso: firma, casella, tratto, tratto nuovo o selezione del testo."""
+        return (
+            self._drag is not None or self._box_drag is not None or self._ink_drag is not None
+            or self._stroke is not None or self._selecting
         )
 
     def _resized_rect(self, start: QRectF, corner: int, pt: QPointF, page_size: tuple[float, float]) -> QRectF:
@@ -972,8 +1074,7 @@ class PdfView(QAbstractScrollArea):
         # Manina: Spazio + tasto sinistro o tasto centrale. Il clic non fa altro.
         if self._pan is not None or self._space_held or event.button() == Qt.MouseButton.MiddleButton:
             buttons = (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton)
-            idle = self._drag is None and self._box_drag is None and self._ink_drag is None and self._stroke is None
-            if self._pan is None and idle and event.button() in buttons:
+            if self._pan is None and not self._busy() and event.button() in buttons:
                 hbar, vbar = self.horizontalScrollBar(), self.verticalScrollBar()
                 self._pan = (event.button(), pos, hbar.value(), vbar.value())
                 self._link_press = None
@@ -1009,6 +1110,11 @@ class PdfView(QAbstractScrollArea):
         if event.button() != Qt.MouseButton.LeftButton or not self._sizes:
             super().mousePressEvent(event)
             return
+        if self._triple_click(pos):
+            event.accept()
+            return
+        # Un clic toglie la selezione del testo; trascinando dal testo ne inizia una nuova.
+        self._set_selection(None)
         placement, corner = self._hit(pos)
         # Le caselle di testo sono sopra a tutto (tranne le maniglie della firma selezionata),
         # anche sopra i campi; il campo ha la precedenza sulla firma.
@@ -1043,6 +1149,8 @@ class PdfView(QAbstractScrollArea):
         # Con una firma o una casella selezionata il clic la deseleziona e basta, anche sopra un link.
         link = self.link_at(pos) if placement is None and self._links_active() else None
         self._link_press = (link, pos) if link is not None else None
+        # Anche da un link: senza trascinare si segue il link, trascinando si seleziona il testo.
+        self._text_press = (self._text_caret(pos), pos) if placement is None and self._text_active() else None
         self._annotations.select(None)
         self._placements.select(placement)
         if placement is not None:
@@ -1091,6 +1199,15 @@ class PdfView(QAbstractScrollArea):
                 if side == 0:  # non più stretta della parola più lunga: si allarga verso sinistra
                     rect.moveRight(start_rect.right())
             self._annotations.preview_rect(box, rect)
+        elif self._selecting:
+            self._drag_selection(pos)
+        elif (
+            self._text_press is not None and event.buttons() & Qt.MouseButton.LeftButton
+            and _moved(self._text_press[1], pos)
+        ):
+            self._selecting = True
+            self._drag_selection(pos)
+            self._update_cursor()
         elif self._placing is not None:
             self.viewport().update()
         else:
@@ -1126,11 +1243,17 @@ class PdfView(QAbstractScrollArea):
             text = "spostamento casella di testo" if side is None else "larghezza casella di testo"
             self._annotations.set_rect(box, start_rect, to_qrect(box.rect), text)
             self._update_cursor()
+        elif self._selecting and event.button() == Qt.MouseButton.LeftButton:
+            self._selecting = False
+            self._autoscroll.stop()
+            self._update_cursor()
         elif self._link_press is not None and event.button() == Qt.MouseButton.LeftButton:
             link, start = self._link_press
             self._link_press = None
             if not _moved(start, event.position()) and self.link_at(event.position()) is link:
                 self._activate(link)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._text_press = None
         event.accept()
 
     def mouseDoubleClickEvent(self, event) -> None:
@@ -1146,6 +1269,17 @@ class PdfView(QAbstractScrollArea):
                 self._open_box_editor(box, new=False)
                 event.accept()
                 return
+            # Doppio clic su una parola: si seleziona quella (il primo clic ha già tolto la selezione).
+            hit = self._text_word(pos)
+            if hit is not None:
+                page, index = hit
+                self._text_press = None
+                self._set_selection(((page, index), (page, index + 1)))
+                timer = QElapsedTimer()
+                timer.start()
+                self._double_click = (timer, pos)
+                event.accept()
+                return
         self.mousePressEvent(event)
 
     def _activate(self, link: PageLink) -> None:
@@ -1156,11 +1290,129 @@ class PdfView(QAbstractScrollArea):
 
     def viewportEvent(self, event) -> bool:
         # Il mouse esce dalla vista: l'anteprima del posizionamento sparisce.
-        if event.type() == QEvent.Type.Leave and self._drag is None and self._pan is None and self._stroke is None:
+        if (
+            event.type() == QEvent.Type.Leave and self._drag is None and self._pan is None and self._stroke is None
+            and not self._selecting
+        ):
             self._cursor_pos = None
             if self._placing is not None:
                 self.viewport().update()
         return super().viewportEvent(event)
+
+    # --- Selezione del testo ------------------------------------------------------------
+
+    def _text_active(self) -> bool:
+        """La selezione del testo risponde al mouse solo se nessuno strumento lo usa (posizionamento
+        firma, Testo/Data, disegno, manina) e nessun trascinamento è in corso."""
+        return (
+            not self._space_held and self._pan is None and self._placing is None and self._text_tool is None
+            and self._draw_tool is None and self._editing_box is None and not self._busy()
+        )
+
+    def _word_at(self, pos: QPointF) -> int | None:
+        hit = self._text_word(pos, check=False)
+        return None if hit is None else hit[1]
+
+    def _text_word(self, pos: QPointF, check: bool = True) -> tuple[int, int] | None:
+        """Pagina e parola sotto il punto della vista; con `check` solo se il clic andrebbe al testo
+        (niente firme, caselle, tratti o campi sopra, nessuno strumento attivo)."""
+        page = self.page_at(pos)
+        text = self._words.get(page) if page is not None else None
+        if text is None:
+            return None
+        if check:
+            placement, _ = self._hit(pos)
+            box, _ = self._hit_box(pos)
+            if (
+                placement is not None or box is not None or self._ink_at(pos) is not None
+                or self._field_at(pos) is not None or not self._text_active()
+            ):
+                return None
+        pt = self.to_page_point(page, pos)
+        index = text.word_at(pt.x(), pt.y())
+        return None if index is None else (page, index)
+
+    def _text_caret(self, pos: QPointF) -> tuple[int, int]:
+        """Posizione nel testo più vicina al punto della vista, anche tra le pagine o fuori dalla vista."""
+        y = pos.y() + self.verticalScrollBar().value()
+        page = max(0, min(bisect.bisect_right(self._tops, y) - 1, len(self._sizes) - 1))
+        if y > self._page_rect(page).bottom():
+            return page, END  # nel margine sotto la pagina
+        pt = self.to_page_point(page, pos)
+        text = self._words.get(page)
+        if text is None:
+            self._request_words(page)
+            return page, 0 if pt.y() < self._sizes[page][1] / 2 else END
+        if pt.y() < 0:
+            return page, 0
+        return page, text.caret_at(pt.x(), pt.y())
+
+    def _ordered_selection(self) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        if self._selection is None or self._selection[0] == self._selection[1]:
+            return None
+        return ordered(*self._selection)
+
+    def _in_selection(self, page: int) -> bool:
+        selection = self._ordered_selection()
+        return selection is not None and selection[0][0] <= page <= selection[1][0]
+
+    def _set_selection(self, selection) -> None:
+        if selection != self._selection:
+            self._selection = selection
+            self._copy_pending = False
+            self.viewport().update()
+
+    def _drag_selection(self, pos: QPointF) -> None:
+        self._set_selection((self._text_press[0], self._text_caret(pos)))
+        # Fuori dalla vista, sopra o sotto, la vista scorre da sola.
+        if pos.y() < 0 or pos.y() > self.viewport().height():
+            if not self._autoscroll.isActive():
+                self._autoscroll.start()
+        else:
+            self._autoscroll.stop()
+
+    def _autoscroll_step(self) -> None:
+        pos = self._cursor_pos
+        if not self._selecting or pos is None:
+            self._autoscroll.stop()
+            return
+        height = self.viewport().height()
+        dy = pos.y() if pos.y() < 0 else max(0.0, pos.y() - height)
+        if not dy:
+            self._autoscroll.stop()
+            return
+        vbar = self.verticalScrollBar()
+        vbar.setValue(vbar.value() + (round(dy / 2) or (1 if dy > 0 else -1)))
+        self._set_selection((self._text_press[0], self._text_caret(pos)))
+
+    def _triple_click(self, pos: QPointF) -> bool:
+        """Terzo clic subito dopo un doppio clic su una parola: si seleziona la riga."""
+        double, self._double_click = self._double_click, None
+        if double is None:
+            return False
+        timer, start = double
+        if timer.elapsed() > QApplication.doubleClickInterval() or _moved(start, pos):
+            return False
+        hit = self._text_word(pos)
+        if hit is None:
+            return False
+        page, index = hit
+        start_index, end_index = self._words[page].line_of(index)
+        self._text_press = None
+        self._set_selection(((page, start_index), (page, end_index)))
+        return True
+
+    def _paint_text_selection(self, painter: QPainter) -> None:
+        selection = self._ordered_selection()
+        if selection is None:
+            return
+        for page in self._visible_range():
+            text = self._words.get(page)
+            if text is None:
+                continue
+            start, end = page_span(selection, page, len(text))
+            for x0, y0, x1, y1 in text.highlight(start, end):
+                painter.fillRect(self.page_rect_to_viewport(page, QRectF(x0, y0, x1 - x0, y1 - y0)), TEXT_SELECTION)
 
     # --- Campi modulo -----------------------------------------------------------------
 
