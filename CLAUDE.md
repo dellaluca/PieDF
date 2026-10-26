@@ -65,8 +65,9 @@ Lettore PDF desktop leggero e portatile con firma visiva stile Acrobat "Firma".
 - `piedf/page_ops.py` – costruzione del PDF riorganizzato da una lista di `PageRef` (senza Qt, gira in un processo a parte: `run`)
 - `piedf/page_organizer.py` – finestra "Organizza pagine": griglia delle miniature con trascinamento, comandi annulla/ripeti, inserisci/estrai, `PageJob` (processo di `page_ops` con avanzamento)
 - `piedf/writer.py` – scrittura delle firme, dei campi compilati e delle annotazioni di PieDF nel PDF (`save_with_signatures`, `SaveError`), controllo firme digitali esistenti
-- `piedf/assets/` – icona e risorse incluse nell'exe
+- `piedf/assets/` – risorse incluse nell'exe: `piedf.svg` è il logo (sorgente, vettoriale), `piedf.ico` l'icona di finestra ed exe generata da `python tools/make_icon.py` (10 dimensioni, sotto i 32 px senza firma). Dopo aver cambiato il logo si rigenera l'ICO, mai disegnarlo a mano
 - `piedf.spec` – spec di PyInstaller (onedir; `-- --onefile` per il confronto), esclusioni, icona, informazioni di versione
+- `tools/make_icon.py` – `piedf/assets/piedf.ico` dal logo SVG (usa QtSvg, che resta escluso dall'exe)
 - `tools/screenshots.py` – rigenera gli screenshot del README (`docs/img/`) su un contratto di esempio, con una cartella dati temporanea
 - `tools/build_exe.py` – lancia PyInstaller, crea lo zip e stampa le dimensioni; `requirements-build.txt` – solo per costruire (PyInstaller)
 - `tests/` – `make_test_pdfs.py` genera PDF di prova in `tests/out/` (ignorata da git); `check_<area>.py` sono i controlli end-to-end offscreen (`check_viewer.py`, `check_signatures.py`, …): uscita 1 se qualcosa fallisce, i controlli solo-Windows si saltano altrove (`check_exe.py` richiede anche la build in `dist/`); `run_all.py` genera i PDF ed esegue tutti i controlli (o solo quelli nominati: `python tests/run_all.py pages forms`)

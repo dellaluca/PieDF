@@ -1,3 +1,5 @@
+<img src="piedf/assets/piedf.svg" alt="" width="96" align="right">
+
 # PieDF
 
 Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa i tuoi PDF, compila i moduli e firma i documenti con la tua firma, senza installare niente. Gratuito e libero.
