@@ -1,89 +1,69 @@
 # PieDF
 
-Lettore PDF leggero e portatile per Windows, con firma visiva dei documenti (come "Firma" di Acrobat). Software libero, licenza [AGPL-3.0](LICENSE).
+Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa i tuoi PDF, compila i moduli e firma i documenti con la tua firma, senza installare niente. Gratuito e libero.
+
+![PieDF con un documento aperto e il pannello delle pagine](docs/img/lettura.png)
+
+> **English** — PieDF is a lightweight, portable PDF reader for Windows 10/11. It opens, searches and prints PDFs, fills in PDF forms, lets you sign documents with a drawn, typed or image signature, adds editable text boxes and freehand drawings, and reorganizes pages (reorder, rotate, insert, extract, delete). No installer: unzip and run `PieDF.exe`; to uninstall, delete the folder. Free software under the [AGPL-3.0](LICENSE). Download: [Releases](https://github.com/dellaluca/PieDF/releases) · [Code signing policy](#code-signing-policy)
+
+## Cosa fa
+
+- **Leggere**: scorrimento continuo, zoom, pannello laterale con le miniature delle pagine e l'indice del documento, link cliccabili. Riapre ogni file alla pagina dove l'avevi lasciato.
+- **Cercare e copiare**: trova una parola in tutto il documento e seleziona il testo per copiarlo.
+- **Firmare**: crea la tua firma (o le iniziali) disegnandola, scrivendola in corsivo o da una foto, e mettila dove serve. Le firme restano salvate per le volte successive.
+- **Compilare i moduli**: caselle di testo, spunte e scelte dei moduli PDF.
+- **Scrivere e disegnare**: aggiungi caselle di testo, la data, tratti a mano libera ed evidenziazioni, modificabili anche dopo il salvataggio.
+- **Organizzare le pagine**: riordina, ruota, elimina pagine, inserisci pagine da altri PDF ed estraine una parte in un file nuovo.
+- **Stampare** quello che vedi, firme comprese.
+
+![Una firma messa su un contratto](docs/img/firma.png)
+
+![La ricerca nel documento](docs/img/ricerca.png)
 
 ## Scaricare e usare
 
-1. Scarica lo zip `PieDF-<versione>-win64.zip` dalle [Release](https://github.com/dellaluca/PieDF/releases) (oppure, per una versione in prova, dagli artifact della run "Build" di una PR) e scompattalo dove vuoi (Documenti, Desktop, una chiavetta USB).
-2. Avvia `PieDF\PieDF.exe`. Non serve installare niente e non si scrive nulla nel registro.
+1. Scarica lo zip `PieDF-<versione>-win64.zip` dalle [Release](https://github.com/dellaluca/PieDF/releases) e scompattalo dove vuoi: Documenti, Desktop, una chiavetta USB.
+2. Avvia `PieDF\PieDF.exe`. Non c'è niente da installare.
 
-Firme e impostazioni finiscono in `PieDF\data\`, accanto all'exe: copiando la cartella si portano dietro anche quelle. Se la cartella non è scrivibile (per esempio `C:\Program Files\PieDF`) si usa `%APPDATA%\PieDF`.
+Le tue firme e le impostazioni stanno nella cartella `PieDF\data`: copiando la cartella di PieDF te le porti dietro. Se PieDF è in una cartella dove non può scrivere, le salva in `%APPDATA%\PieDF`.
 
-**Aprire i PDF con PieDF**: tasto destro su un PDF → *Apri con* → *Scegli un'altra app* → *Cerca un'altra app in questo PC* e scegli `PieDF.exe`. Spuntando *Usa sempre quest'app* PieDF diventa il lettore predefinito. Si può anche trascinare un PDF sull'exe o nella finestra.
+**Aprire i PDF con PieDF**: tasto destro su un PDF → *Apri con* → *Scegli un'altra app* → *Cerca un'altra app in questo PC* e scegli `PieDF.exe`. Spuntando *Usa sempre quest'app* PieDF diventa il lettore predefinito. Puoi anche trascinare un PDF sull'icona di PieDF o nella finestra.
 
-## Costruire l'exe
-
-Ogni PR lo costruisce e lo prova da sola nel controllo "Build" (lo zip è tra gli artifact della run). A mano:
-
-Su Windows, con Python 3.12:
-
-```bash
-pip install -r requirements.txt -r requirements-build.txt
-python tools/build_exe.py             # dist\PieDF\PieDF.exe e dist\PieDF-<versione>-win64.zip
-python tools/build_exe.py --onefile   # dist\PieDF.exe, un solo file (solo per confronto)
-python tests/make_test_pdfs.py
-python tests/check_exe.py             # avvia l'exe e controlla processi, dati portatili, chiusura
-```
-
-Si distribuisce la versione a cartella (onedir) dentro lo zip: il onefile si scompatta in una cartella temporanea a ogni avvio, quindi parte più lento. Le opzioni di build (moduli Qt esclusi, icona, informazioni di versione) sono in `piedf.spec`.
-
-## Sviluppo
-
-Serve Python 3.12.
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python -m piedf            # finestra vuota
-python -m piedf file.pdf   # apre direttamente un file
-```
-
-Controlli automatici del viewer e delle firme, su PDF di prova (semplice, 350 pagine, cifrato, scansionato, danneggiati…):
-
-```bash
-python tests/make_test_pdfs.py
-set QT_QPA_PLATFORM=offscreen
-python tests/check_viewer.py
-python tests/check_signatures.py
-```
+**Disinstallare**: cancella la cartella di PieDF (e `%APPDATA%\PieDF`, se esiste).
 
 ## Scorciatoie
 
 | Tasto | Azione |
 |---|---|
-| Ctrl+O | Apri |
-| Ctrl+W | Chiudi documento |
+| Ctrl+O / Ctrl+S / Ctrl+P | Apri / Salva / Stampa |
+| Ctrl+W | Chiudi il documento |
+| Ctrl+F, F3 / Maiusc+F3 | Cerca, risultato successivo / precedente |
+| Ctrl+C / Ctrl+A | Copia il testo selezionato / Seleziona tutto |
 | Ctrl+rotella, Ctrl++ / Ctrl+− | Zoom |
-| Ctrl+1 / Ctrl+0 / Ctrl+2 | Dimensione reale / Adatta pagina / Adatta larghezza |
-| Ctrl+PgSu / Ctrl+PgGiù | Pagina precedente / successiva |
+| Ctrl+1 | Dimensione reale |
 | Ctrl+G | Vai a pagina |
-| Home / Fine | Inizio / fine documento |
-| Spazio + trascina / tasto centrale | Sposta il documento |
+| Ctrl+PgSu / Ctrl+PgGiù | Pagina precedente / successiva |
+| Alt+← / Alt+→ | Indietro / Avanti dopo aver seguito un link |
+| F4 | Pannello laterale |
+| Ctrl+T / Ctrl+D | Aggiungi testo / Disegna |
+| Ctrl+Maiusc+O | Organizza pagine |
+| Spazio + trascina, tasto centrale | Sposta il foglio |
 
-Lo sviluppo procede a ticket: vedi le [issue](https://github.com/dellaluca/PieDF/issues).
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+
+Only the files built by the "Release" workflow from the source code of this repository are signed, and every release is approved by hand before signing.
+
+- Committers and reviewers: [@dellaluca](https://github.com/dellaluca). Changes proposed by the repository's automated assistants are opened as pull requests and reviewed by a committer before merging.
+- Approvers: [@dellaluca](https://github.com/dellaluca).
+
+**Privacy policy**: This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. The only outgoing action is opening a web or e-mail link contained in a PDF, in the default browser or mail client, after the user clicks it and confirms the address.
+
+*In italiano*: gli exe delle Release sono firmati gratuitamente da SignPath Foundation, così Windows riconosce chi li pubblica. Si firma solo quello che viene costruito da questo codice e ogni versione è approvata a mano. PieDF non invia dati in rete: l'unico collegamento verso l'esterno è l'apertura di un link contenuto in un PDF, dopo il clic e la conferma dell'indirizzo.
 
 ## Licenza
 
-PieDF è software libero: puoi usarlo, studiarlo, modificarlo e ridistribuirlo secondo la [GNU Affero General Public License v3.0](LICENSE). Chi distribuisce una versione modificata deve renderne disponibile il codice sorgente con la stessa licenza.
+PieDF è software libero: puoi usarlo, studiarlo, modificarlo e ridistribuirlo secondo la [GNU Affero General Public License v3.0](LICENSE). Usa [PyMuPDF](https://pymupdf.readthedocs.io/) (AGPL-3.0) e [Qt for Python](https://doc.qt.io/qtforpython-6/) (LGPL-3.0).
 
-PieDF usa [PyMuPDF](https://pymupdf.readthedocs.io/) (AGPL-3.0, Artifex) e [Qt for Python / PySide6](https://doc.qt.io/qtforpython-6/) (LGPL-3.0).
-
-## Firma del codice
-
-Gli exe delle Release sono firmati con la firma gratuita per progetti open source: free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/). Si firma solo quello che il workflow "Release" costruisce dal codice di questo repo. Dettagli e configurazione: [docs/firma-codice.md](docs/firma-codice.md).
-
-- Autori e revisori (committer e approver): [@dellaluca](https://github.com/dellaluca). Le modifiche proposte dagli assistenti automatici del repo diventano PR che vengono riviste prima del merge.
-- Chi approva le firme: [@dellaluca](https://github.com/dellaluca).
-
-**Privacy**: PieDF non invia dati in rete. L'unico collegamento verso l'esterno è l'apertura nel browser di un link contenuto in un PDF, solo dopo aver cliccato il link e confermato l'indirizzo.
-
-## Pubblicare una versione
-
-1. Aggiorna `__version__` in `piedf/__init__.py` con una PR e uniscila.
-2. Crea e invia il tag corrispondente:
-   ```bash
-   git tag v0.1.0
-   git push origin v0.1.0
-   ```
-3. Il workflow "Release" costruisce l'exe su Windows, lo prova e crea la Release con lo zip allegato. Se il tag non corrisponde a `__version__` si ferma con un errore.
+Vuoi contribuire o costruire PieDF da te? Vedi [docs/sviluppo.md](docs/sviluppo.md) e le [issue](https://github.com/dellaluca/PieDF/issues).

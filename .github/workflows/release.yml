@@ -40,8 +40,10 @@ jobs:
           cache: pip
 
       - name: Il tag corrisponde alla versione
+        id: versione
         run: |
           versione=$(python -c "import piedf; print(piedf.__version__)")
+          echo "versione=$versione" >> "$GITHUB_OUTPUT"
           if [ "$TAG" != "v$versione" ]; then
             echo "::error::Il tag $TAG non corrisponde a __version__ = $versione in piedf/__init__.py"
             exit 1
@@ -83,6 +85,10 @@ jobs:
           wait-for-completion: true
           wait-for-completion-timeout-in-seconds: 1800
           output-artifact-directory: dist/firmato
+          # Le restrizioni dell'artifact configuration (docs/firma-codice.md) controllano
+          # che ProductVersion e FileVersion dell'exe siano questa versione.
+          parameters: |
+            version: "${{ steps.versione.outputs.versione }}"
 
       - name: Rifai lo zip con l'exe firmato
         if: env.SIGNPATH_API_TOKEN != ''
@@ -102,4 +108,5 @@ jobs:
       - name: Pubblica la release
         run: |
           zip=$(ls dist/PieDF-*-win64.zip)
-          gh release create "$TAG" "$zip" --title "PieDF $TAG" --generate-notes
+          note="PieDF $TAG: lettore PDF portatile per Windows 10/11, con firma visiva. Scompatta lo zip e avvia \`PieDF\PieDF.exe\`; per disinstallare cancella la cartella. Funzioni e istruzioni: [README](https://github.com/$GITHUB_REPOSITORY#readme). [Code signing policy](https://github.com/$GITHUB_REPOSITORY#code-signing-policy)"
+          gh release create "$TAG" "$zip" --title "PieDF $TAG" --notes "$note" --generate-notes

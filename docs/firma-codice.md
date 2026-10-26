@@ -21,24 +21,29 @@ Si firma solo `PieDF.exe`: è anche il processo di render (lo stesso exe con `--
      ```xml
      <?xml version="1.0" encoding="utf-8"?>
      <artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+       <parameters>
+         <parameter name="version" required="true" />
+       </parameters>
        <zip-file>
-         <pe-file path="PieDF.exe">
+         <pe-file path="PieDF.exe" product-name="PieDF" product-version="${version}"
+                  file-version="${version}" original-filename="PieDF.exe">
            <authenticode-sign />
          </pe-file>
        </zip-file>
      </artifact-configuration>
      ```
+     Le restrizioni sui metadati sono obbligatorie per SignPath Foundation: nome del prodotto e versione dell'exe (da `piedf.spec`, cioè `piedf.__version__`) devono essere quelli attesi. `release.yml` passa `version` alla richiesta di firma.
    - signing policy `release-signing` (con approvazione manuale: ogni release va approvata nel portale o dalla mail di SignPath);
    - un utente CI con il suo API token.
 4. **Su GitHub** (Settings → Secrets and variables → Actions):
    - secret `SIGNPATH_API_TOKEN` = token dell'utente CI;
    - variabile `SIGNPATH_ORGANIZATION_ID` = ID dell'organizzazione SignPath;
    - solo se diversi dai predefiniti: variabili `SIGNPATH_PROJECT_SLUG` (predefinito `PieDF`) e `SIGNPATH_SIGNING_POLICY` (predefinito `release-signing`).
-5. Pubblicare una versione nuova (README → "Pubblicare una versione") e approvare la richiesta di firma su SignPath.
+5. Pubblicare una versione nuova ([sviluppo.md](sviluppo.md#pubblicare-una-versione)) e approvare la richiesta di firma su SignPath.
 
 ## Regole di SignPath Foundation da rispettare
 
-- La sezione "Firma del codice" del README (crediti, ruoli, privacy) deve restare aggiornata.
+- La sezione "Code signing policy" del README (crediti, ruoli, privacy) deve restare aggiornata, con questo titolo: SignPath la cerca nella home page e nella pagina di download. Anche le note di ogni Release contengono il link (le scrive `release.yml`).
 - Si firma solo quello che il workflow costruisce dal codice del repo: niente binari aggiunti a mano.
 - Autenticazione a due fattori attiva sull'account GitHub di chi può unire nel repo e sull'account SignPath.
 
