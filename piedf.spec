@@ -86,7 +86,7 @@ def version_info():
                 StringStruct("ProductVersion", VERSION),
                 StringStruct("InternalName", "PieDF"),
                 StringStruct("OriginalFilename", "PieDF.exe"),
-                StringStruct("LegalCopyright", "PieDF - uso personale (PyMuPDF: AGPL-3.0)"),
+                StringStruct("LegalCopyright", "PieDF contributors - AGPL-3.0"),
             ])]),
             VarFileInfo([VarStruct("Translation", [0x0410, 1200])]),
         ],
