@@ -14,7 +14,7 @@ Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa
 - **Cercare e copiare**: trova una parola in tutto il documento e seleziona il testo per copiarlo.
 - **Firmare**: crea la tua firma (o le iniziali) disegnandola, scrivendola in corsivo o da una foto, e mettila dove serve. Le firme restano salvate per le volte successive.
 - **Compilare i moduli**: caselle di testo, spunte e scelte dei moduli PDF.
-- **Scrivere e disegnare**: aggiungi caselle di testo, la data, tratti a mano libera ed evidenziazioni, modificabili anche dopo il salvataggio.
+- **Scrivere e disegnare**: aggiungi caselle di testo (con i font installati sul PC: il PDF si vede uguale anche dove quel font non c'è), la data, tratti a mano libera ed evidenziazioni, modificabili anche dopo il salvataggio.
 - **Organizzare le pagine**: riordina, ruota, elimina pagine, inserisci pagine da altri PDF ed estraine una parte in un file nuovo.
 - **Stampare** quello che vedi, firme comprese.
 
