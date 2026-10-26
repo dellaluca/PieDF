@@ -470,7 +470,8 @@ def main():
 
     installed = fonts.installed()
     # Georgia e Segoe UI ci sono in ogni Windows; altrove (il worker su Linux) un font libero.
-    choice = next((f for f in ("Georgia", "Segoe UI", "DejaVu Serif", "Liberation Serif", "DejaVu Sans")
+    # Lato, come Georgia, ha lo stesso glifo per lo spazio e per U+00A0 (spazio unificatore).
+    choice = next((f for f in ("Georgia", "Segoe UI", "Lato", "DejaVu Serif", "Liberation Serif", "DejaVu Sans")
                    if f in installed), None)
     check("11. un font installato da provare", choice is not None, str(sorted(installed)))
     if choice not in QFontDatabase.families():

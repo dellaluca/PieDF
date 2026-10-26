@@ -333,7 +333,8 @@ def subset_font(doc, face: Face, text: str) -> int:
     """Incorpora in `doc` il font con i soli glifi del testo e restituisce l'xref del /Font.
 
     Il subset lo fa MuPDF (`subset_fonts`) in un documento a parte, da cui si copia il font:
-    così i font del documento non si toccano.
+    così i font del documento non si toccano. La /ToUnicode di MuPDF si sostituisce con quella
+    dei caratteri del testo (`to_unicode`).
     """
     scratch = pymupdf.open()
     try:
@@ -350,10 +351,39 @@ def subset_font(doc, face: Face, text: str) -> int:
             pass  # senza subset il font resta intero: il testo si vede comunque giusto
         ref = mupdf.pdf_dict_getp(mupdf.pdf_load_object(pymupdf._as_pdf_document(scratch), page.xref),
                                   "Resources/Font/F")
-        copied = mupdf.pdf_graft_object(pymupdf._as_pdf_document(doc), ref)
-        return mupdf.pdf_to_num(copied)
+        xref = mupdf.pdf_to_num(mupdf.pdf_graft_object(pymupdf._as_pdf_document(doc), ref))
+        cmap = doc.get_new_xref()
+        doc.update_object(cmap, "<<>>")
+        doc.update_stream(cmap, to_unicode(face, text))
+        doc.xref_set_key(xref, "ToUnicode", f"{cmap} 0 R")
+        return xref
     finally:
         scratch.close()
+
+
+def to_unicode(face: Face, text: str) -> bytes:
+    """CMap /ToUnicode con i soli glifi del testo, ognuno col carattere che lo ha scritto.
+
+    Quella di MuPDF copre tutto il font, ma con più caratteri sullo stesso glifo ne sceglie
+    uno a caso: Georgia ha lo stesso glifo per lo spazio e per U+00A0, e MuPDF sceglie
+    U+00A0 (get_text non trovava più il testo e alla riapertura lo spazio mancava).
+    """
+    chars: dict[int, str] = {}
+    for ch in text:
+        gid = face.gid(ch)
+        if ch != "\n" and gid:
+            chars.setdefault(gid, ch)
+    entries = [f"<{gid:04x}> <{ch.encode('utf-16-be').hex()}>" for gid, ch in sorted(chars.items())]
+    blocks = [f"{len(entries[i:i + 100])} beginbfchar\n" + "\n".join(entries[i:i + 100]) + "\nendbfchar"
+              for i in range(0, len(entries), 100)]
+    return "\n".join([
+        "/CIDInit /ProcSet findresource begin", "12 dict begin", "begincmap",
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def",
+        "/CMapName /Adobe-Identity-UCS def", "/CMapType 2 def",
+        "1 begincodespacerange", "<0000> <ffff>", "endcodespacerange",
+        *blocks,
+        "endcmap", "CMapName currentdict /CIDInit /ProcSet findresource /defineresource pop", "end", "end",
+    ]).encode()
 
 
 def full_font(doc, face: Face) -> int:
@@ -418,7 +448,8 @@ def read_embedded(doc, xref: int, family: str, used: set[int]) -> EmbeddedFont |
     """Il font Type0 `xref` scritto da PieDF: programma del font e mappa carattere → glifo.
 
     `used` sono i glifi scritti dalle caselle che lo usano: solo quelli ci sono davvero nel
-    subset (la /ToUnicode copre ancora tutto il font), e solo i loro caratteri si possono riusare.
+    subset (la /ToUnicode può avere anche altri caratteri del subset), e solo i loro caratteri
+    si possono riusare.
     """
     try:
         kind, base = doc.xref_get_key(xref, "BaseFont")
