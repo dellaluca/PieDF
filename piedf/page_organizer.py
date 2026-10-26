@@ -698,13 +698,14 @@ class PageOrganizer(QDialog):
         while process.is_alive() and time.monotonic() < deadline:
             # Si svuotano i risultati: un processo che esce aspetta che le miniature
             # già spedite lascino la pipe (su Windows il buffer è piccolo) e non uscirebbe.
+            # Si legge solo finché è vivo: un messaggio iniziato lo finisce di scrivere.
             try:
                 while True:
                     self._thumb_results.get_nowait()
-            except (queue.Empty, OSError, ValueError):
+            except (queue.Empty, OSError, ValueError, EOFError):
                 pass
             process.join(0.05)
-        if process.is_alive():
+        if process.is_alive():  # dopo terminate() non si legge più: un messaggio a metà bloccherebbe
             process.terminate()
             process.join(2)
         for q in (self._thumb_requests, self._thumb_results):

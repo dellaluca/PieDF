@@ -10,6 +10,8 @@ Messaggi in ingresso:
     ("links", gen, page)                  link della pagina, risposta subito
     ("words", gen, page)                  parole della pagina (selezione del testo), risposta subito
     ("field", gen, page, xref, value)     valore di un campo modulo, solo nel documento in memoria
+    ("search", gen, id, text, case, start)  cerca in tutte le pagine da `start` (poi da capo);
+                                          sostituisce la ricerca in corso, testo vuoto = ferma
     ("quit",)
 Messaggi in uscita:
     ("page", gen, page, scale, width, height, stride, samples_rgb)
@@ -18,6 +20,8 @@ Messaggi in uscita:
     ("error", gen, message)
     ("closed", gen)                       documento chiuso: il file non è più aperto qui
     ("field", gen, page)                  campo applicato: i render precedenti della pagina sono vecchi
+    ("hits", gen, id, page, [rect, ...])  risultati di una pagina (solo le pagine con risultati)
+    ("search_done", gen, id, has_text)    fine della ricerca; has_text False = nessuna pagina ha testo
 
 Link: `rect` (x0, y0, x1, y1) e `to` (x, y) sono in punti nello spazio della pagina come
 si vede (dopo /Rotate), come `page.rect`. `kind` è "goto" (interno: `page` e `to`, con
@@ -27,6 +31,12 @@ così com'è, anche file:, launch e link ad altri PDF; decide la GUI cosa seguir
 Parole (#15): rettangoli nello stesso spazio, nell'ordine di lettura di
 `get_text("words", sort=True)` ma calcolato dopo /Rotate (MuPDF dà le parole, e le ordina,
 nella pagina non ruotata). Una pagina senza testo (scansione) ha la lista vuota.
+
+Ricerca (#14): una pagina alla volta, e solo quando non ci sono pagine da disegnare: il
+render delle pagine visibili ha sempre la precedenza. `search_for` di MuPDF ignora le
+maiuscole: con `case` si tengono solo i risultati il cui testo coincide anche nelle maiuscole.
+I rettangoli sono nello spazio della pagina come si vede, come quelli dei link
+(`search_for` li dà nella pagina non ruotata: verificato con /Rotate 90).
 
 Le annotazioni di PieDF (caselle di testo e tratti) le disegna la vista dal suo modello: qui si
 cancellano dal documento in memoria prima del primo render di ogni pagina, così non
@@ -55,11 +65,12 @@ def run(requests, results) -> None:
     gen = 0
     wanted: list[tuple[int, float]] = []
     cleaned: set[int] = set()  # pagine già senza le annotazioni di PieDF
+    search = None  # ricerca in corso: [id, testo, maiuscole, pagine da cercare, testo trovato]
 
     while True:
         # Senza lavoro si aspetta; altrimenti si leggono solo i messaggi già arrivati,
         # così le richieste vecchie (scroll veloce, zoom) vengono scartate.
-        msg = _get(requests) if not wanted else _get_nowait(requests)
+        msg = _get(requests) if not wanted and search is None else _get_nowait(requests)
         while msg is not None:
             kind = msg[0]
             if kind == "quit":
@@ -68,6 +79,7 @@ def run(requests, results) -> None:
                 _, gen, path, password = msg
                 wanted = []
                 cleaned = set()
+                search = None
                 if doc is not None:
                     doc.close()
                 doc = None
@@ -82,6 +94,13 @@ def run(requests, results) -> None:
                 except Exception as e:
                     doc = None
                     results.put(("error", gen, str(e)))
+            elif kind == "search" and msg[1] == gen:
+                _, _, sid, text, case, start = msg
+                search = None
+                if text.strip() and doc is not None:
+                    n = doc.page_count
+                    start = max(0, min(start, n - 1))
+                    search = [sid, text, case, list(range(start, n)) + list(range(start)), False]
             elif kind == "want" and msg[1] == gen:
                 wanted = list(msg[2])
             elif kind == "field" and msg[1] == gen and doc is not None:
@@ -107,8 +126,23 @@ def run(requests, results) -> None:
                     results.put(("error", gen, f"Testo di pagina {page + 1}: {e}"))
             msg = _get_nowait(requests)
 
-        if doc is None or not wanted:
-            wanted = []
+        if doc is None:
+            wanted, search = [], None
+            continue
+        if not wanted:
+            if search is not None:
+                sid, text, case, pages, has_text = search
+                page = pages.pop(0)
+                try:
+                    rects, page_text = _search(doc[page], text, case, not has_text)
+                    search[4] = has_text or page_text
+                    if rects:
+                        results.put(("hits", gen, sid, page, rects))
+                except Exception as e:
+                    results.put(("error", gen, f"Ricerca a pagina {page + 1}: {e}"))
+                if not pages:
+                    results.put(("search_done", gen, sid, search[4]))
+                    search = None
             continue
 
         page, scale = wanted.pop(0)
@@ -220,9 +254,10 @@ def thumbnails(requests, results) -> None:
             if msg[0] == "quit":
                 for doc in docs.values():
                     doc.close()
-                # Le miniature non ancora lette non servono più: senza questo il processo
-                # aspetterebbe all'uscita che la GUI le legga.
-                results.cancel_join_thread()
+                # Niente cancel_join_thread(): uscendo si finisce di spedire le miniature già
+                # in coda (la GUI le scarta in _stop_thumbs). Un messaggio interrotto a metà
+                # bloccherebbe per sempre la GUI che lo sta leggendo: la pipe non arriva mai a
+                # EOF, perché anche la GUI ne tiene aperto il lato in scrittura.
                 return
             if msg[0] == "source":
                 sources[msg[1]] = (msg[2], msg[3])
@@ -244,6 +279,37 @@ def thumbnails(requests, results) -> None:
             results.put(("thumb", sid, page, pix.width, pix.height, pix.stride, pix.samples))
         except Exception as e:
             results.put(("error", sid, page, str(e)))
+
+
+def _search(page, text: str, case: bool, check_text: bool) -> tuple[list[tuple], bool]:
+    """Risultati di `text` nella pagina, nello spazio come si vede, e se la pagina ha testo
+    (controllato solo con `check_text`: basta una pagina per saperlo)."""
+    import pymupdf
+
+    textpage = page.get_textpage()
+    has_text = check_text and bool(textpage.extractText().strip())
+    rects = page.search_for(text, textpage=textpage)
+    if case and rects:
+        wanted = " ".join(text.split())
+        # Caratteri della pagina presi una volta sola (get_textbox per ogni risultato costa
+        # ~45 ms). Un risultato su più righe arriva a pezzi: ogni pezzo è una parte del testo.
+        lines = [
+            (pymupdf.Rect(line["bbox"]), [(pymupdf.Rect(c["bbox"]), c["c"]) for span in line["spans"] for c in span["chars"]])
+            for block in textpage.extractRAWDICT()["blocks"] if block["type"] == 0
+            for line in block["lines"]
+        ]
+
+        def exact(r) -> bool:
+            found = " ".join("".join(
+                c for line_rect, chars in lines if line_rect.intersects(r)
+                for box, c in chars if (box.tl + box.br) / 2 in r
+            ).split())
+            return bool(found) and (wanted in found or found in wanted)
+
+        rects = [r for r in rects if exact(r)]
+    m = page.rotation_matrix
+    rects = [r * m for r in rects]
+    return [(r.x0, r.y0, r.x1, r.y1) for r in rects], has_text
 
 
 def _links(doc, index: int) -> list[dict]:
