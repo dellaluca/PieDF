@@ -16,6 +16,7 @@ class Renderer(QObject):
     """Interfaccia lato GUI verso il processo di render."""
 
     page_ready = Signal(int, int, float, QImage)  # gen, pagina, scala, immagine
+    thumb_ready = Signal(int, int, QImage)  # gen, pagina, miniatura del pannello laterale
     links_ready = Signal(int, int, list)  # gen, pagina, link (vedi render_worker)
     words_ready = Signal(int, int, list)  # gen, pagina, parole (vedi render_worker)
     failed = Signal(int, str)  # gen, messaggio
@@ -42,6 +43,7 @@ class Renderer(QObject):
 
         self._reader = _ResultReader(self._results, self._on_closed)
         self._reader.page_ready.connect(self.page_ready)
+        self._reader.thumb_ready.connect(self.thumb_ready)
         self._reader.links_ready.connect(self.links_ready)
         self._reader.words_ready.connect(self.words_ready)
         self._reader.failed.connect(self.failed)
@@ -126,6 +128,11 @@ class Renderer(QObject):
         else:
             self.failed.emit(gen, "Il motore di rendering si è interrotto su questo documento.")
 
+    def request_thumbs(self, gen: int, items: list[tuple[int, float]]) -> None:
+        """Miniature (pagina, scala): sostituiscono la lista precedente, dopo le pagine della vista."""
+        if self._ensure_alive():
+            self._requests.put(("thumbs", gen, items))
+
     def request_links(self, gen: int, page: int) -> None:
         if self._ensure_alive():
             self._requests.put(("links", gen, page))
@@ -156,6 +163,7 @@ class _ResultReader(QThread):
     """Legge i risultati dal processo e li inoltra alla GUI come segnali."""
 
     page_ready = Signal(int, int, float, QImage)
+    thumb_ready = Signal(int, int, QImage)
     links_ready = Signal(int, int, list)
     words_ready = Signal(int, int, list)
     failed = Signal(int, str)
@@ -177,6 +185,10 @@ class _ResultReader(QThread):
                 _, gen, page, scale, width, height, stride, samples = msg
                 image = QImage(samples, width, height, stride, QImage.Format.Format_RGB888).copy()
                 self.page_ready.emit(gen, page, scale, image)
+            elif msg[0] == "thumb":
+                _, gen, page, width, height, stride, samples = msg
+                image = QImage(samples, width, height, stride, QImage.Format.Format_RGB888).copy()
+                self.thumb_ready.emit(gen, page, image)
             elif msg[0] == "links":
                 self.links_ready.emit(msg[1], msg[2], msg[3])
             elif msg[0] == "words":

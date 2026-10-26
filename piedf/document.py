@@ -1,3 +1,4 @@
+import math
 import re
 from dataclasses import dataclass, field
 
@@ -6,6 +7,8 @@ import pymupdf
 from piedf.ink import bounds as ink_bounds
 
 A4 =(595.0, 842.0)
+MAX_TOC = 20_000  # voci dell'indice: oltre si tagliano (un indice ciclico non finirebbe mai)
+MAX_TOC_LEVEL = 50
 OFF = "Off"  # valore di una casella o di un gruppo radio senza spunta
 
 # Annotazioni modificabili di PieDF: si riconoscono dal titolo (/T).
@@ -111,6 +114,16 @@ def ink_rect(strokes, width: float) -> tuple[float, float, float, float]:
     return (x0 - r, y0 - r, x1 + r, y1 + r)
 
 
+@dataclass(frozen=True)
+class TocEntry:
+    """Voce dell'indice (#6): livello da 1, destinazione nello spazio della pagina come si vede."""
+
+    level: int
+    title: str
+    page: int  # da 0; -1 = nessuna destinazione nel documento
+    y: float | None = None  # punti PDF nella pagina; None = in cima
+
+
 @dataclass
 class PdfDocument:
     path: str
@@ -121,6 +134,7 @@ class PdfDocument:
     fields: list[FormField] = field(default_factory=list)
     xfa: bool = False  # modulo XFA: i campi non si leggono
     annotations: list[Annotation] = field(default_factory=list)  # solo quelle di PieDF
+    toc: list[TocEntry] = field(default_factory=list)  # indice (segnalibri), in ordine
 
 
 def open_document(path: str, password: str | None = None) -> PdfDocument:
@@ -154,10 +168,38 @@ def open_document(path: str, password: str | None = None) -> PdfDocument:
         xfa = _has_xfa(doc)
         fields = [] if xfa else _read_fields(doc)
         annotations = _read_annotations(doc)
-        return PdfDocument(path, password, sizes, doc.is_repaired or broken > 0, fields, xfa, annotations)
+        toc = _read_toc(doc, sizes)
+        return PdfDocument(path, password, sizes, doc.is_repaired or broken > 0, fields, xfa, annotations, toc)
     finally:
         # Chiudere subito evita di tenere il file bloccato su Windows.
         doc.close()
+
+
+def _read_toc(doc, sizes: list[tuple[float, float]]) -> list[TocEntry]:
+    """Indice del PDF. Come per i link, `doc.resolve_link` dà la destinazione già nello spazio
+    della pagina come si vede (get_toc lascia le coordinate così come sono scritte)."""
+    entries = []
+
+    def walk(item, level: int) -> None:
+        while item is not None and len(entries) < MAX_TOC:
+            page, y = -1, None
+            try:
+                if item.uri and not item.is_external:
+                    page, _, y = doc.resolve_link(item.uri)
+                    y = None if math.isnan(y) or not 0 <= page < len(sizes) else max(0.0, min(y, sizes[page][1]))
+            except Exception:
+                page, y = -1, None
+            title = " ".join((item.title or "").split())
+            entries.append(TocEntry(level, title, page if 0 <= page < len(sizes) else -1, y))
+            if item.down is not None and level < MAX_TOC_LEVEL:
+                walk(item.down, level + 1)
+            item = item.next
+
+    try:
+        walk(doc.outline, 1)
+    except Exception:
+        pass  # un indice rotto non impedisce di leggere il documento
+    return entries
 
 
 def _has_xfa(doc) -> bool:

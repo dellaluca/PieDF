@@ -1,4 +1,4 @@
-"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotati, firmato digitalmente, moduli, link, senza permesso di stampa, numerati e con indice (pagine), FreeText e Ink di un altro programma."""
+"""Genera i PDF di prova in tests/out/pdfs: semplice, lungo, cifrato, scansionato, pesante, danneggiati, ruotati, firmato digitalmente, moduli, link, senza permesso di stampa, numerati e con indice (pagine), con indice a 2 livelli (pannello laterale), FreeText e Ink di un altro programma."""
 import random, re, sys
 from pathlib import Path
 import pymupdf
@@ -220,6 +220,24 @@ d.set_toc([[1, "Inizio", 1], [1, "Centro", 3], [2, "Fine", 5]])
 d[2].add_text_annot((60, 60), "Nota di pagina 3")
 widget(d[2], T, "CampoPagina3", (150, 700, 400, 720), field_value="Testo di pagina 3")
 d.save(out / "struttura_5.pdf")
+
+# Pannello laterale (#6): indice a 2 livelli su 12 pagine, voci con y e una pagina ruotata (/Rotate 90).
+d = pymupdf.open()
+for i in range(12):
+    p = d.new_page(width=595, height=842)
+    p.insert_text((72, 100), f"Capitolo pagina {i + 1}", fontsize=24)
+    p.insert_text((72, 600), f"Paragrafo in basso a pagina {i + 1}", fontsize=14)
+d[9].set_rotation(90)
+goto = lambda page, y: {"kind": pymupdf.LINK_GOTO, "page": page, "to": pymupdf.Point(72, y)}
+d.set_toc([
+    [1, "Introduzione", 1],
+    [2, "Scopo", 2],
+    [2, "Paragrafo in basso", 3, goto(2, 600)],
+    [1, "Metodo", 5],
+    [2, "Pagina ruotata", 10],
+    [1, "Conclusioni", 12],
+])
+d.save(out / "indice.pdf")
 
 data = (out / "lungo_350.pdf").read_bytes()
 (out / "danneggiato.pdf").write_bytes(data[: len(data) // 2])  # troncato a metà: irrecuperabile
