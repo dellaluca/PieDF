@@ -72,8 +72,11 @@ def main() -> int:
         print(f"== {c.name}: {'ok' if code == 0 else 'FALLITO'} ({time.monotonic() - start:.0f} s) {summary}", flush=True)
         if code:
             failed.append(c.name)
+            # Anche con tutti gli OK: un crash nativo all'uscita (#54, 0xC0000409 su Windows).
+            print(f"    codice d'uscita {code} (0x{code & 0xFFFFFFFF:08X})", flush=True)
             for line in lines:
-                if line.startswith("FAIL") or "Traceback" in line or "Error" in line or "TIMEOUT" in line:
+                if (line.startswith("FAIL") or "Traceback" in line or "Error" in line or "TIMEOUT" in line
+                        or "Fatal" in line):
                     print("   ", line, flush=True)
 
     print(f"\n{len(checks) - len(failed)}/{len(checks)} controlli superati"
