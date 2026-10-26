@@ -2,9 +2,11 @@
 
 Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa i tuoi PDF, compila i moduli e firma i documenti con la tua firma, senza installare niente. Gratuito e libero.
 
+**[⬇ Scarica PieDF per Windows](https://github.com/dellaluca/PieDF/releases/latest/download/PieDF-win64.zip)** (ultima versione, zip)
+
 ![PieDF con un documento aperto e il pannello delle pagine](docs/img/lettura.png)
 
-> **English** — PieDF is a lightweight, portable PDF reader for Windows 10/11. It opens, searches and prints PDFs, fills in PDF forms, lets you sign documents with a drawn, typed or image signature, adds editable text boxes and freehand drawings, and reorganizes pages (reorder, rotate, insert, extract, delete). No installer: unzip and run `PieDF.exe`; to uninstall, delete the folder. Free software under the [AGPL-3.0](LICENSE). Download: [Releases](https://github.com/dellaluca/PieDF/releases) · [Code signing policy](#code-signing-policy)
+> **English** — PieDF is a lightweight, portable PDF reader for Windows 10/11. It opens, searches and prints PDFs, fills in PDF forms, lets you sign documents with a drawn, typed or image signature, adds editable text boxes and freehand drawings, and reorganizes pages (reorder, rotate, insert, extract, delete). No installer: unzip and run `PieDF.exe`; to uninstall, delete the folder. Free software under the [AGPL-3.0](LICENSE). Download: [PieDF-win64.zip](https://github.com/dellaluca/PieDF/releases/latest/download/PieDF-win64.zip) (latest version) · [all releases](https://github.com/dellaluca/PieDF/releases)
 
 ## Cosa fa
 
@@ -22,8 +24,9 @@ Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa
 
 ## Scaricare e usare
 
-1. Scarica lo zip `PieDF-<versione>-win64.zip` dalle [Release](https://github.com/dellaluca/PieDF/releases) e scompattalo dove vuoi: Documenti, Desktop, una chiavetta USB.
+1. [Scarica lo zip](https://github.com/dellaluca/PieDF/releases/latest/download/PieDF-win64.zip) (oppure una versione precedente dalle [Release](https://github.com/dellaluca/PieDF/releases)) e scompattalo dove vuoi: Documenti, Desktop, una chiavetta USB.
 2. Avvia `PieDF\PieDF.exe`. Non c'è niente da installare.
+3. La prima volta Windows può mostrare «PC protetto da Windows»: PieDF non ha ancora una firma digitale, quindi Windows non ne conosce l'autore. Clicca **Ulteriori informazioni** → **Esegui comunque**. Il codice di ogni versione è pubblico in questo repository.
 
 Le tue firme e le impostazioni stanno nella cartella `PieDF\data`: copiando la cartella di PieDF te le porti dietro. Se PieDF è in una cartella dove non può scrivere, le salva in `%APPDATA%\PieDF`.
 
@@ -49,18 +52,11 @@ Le tue firme e le impostazioni stanno nella cartella `PieDF\data`: copiando la c
 | Ctrl+Maiusc+O | Organizza pagine |
 | Spazio + trascina, tasto centrale | Sposta il foglio |
 
-## Code signing policy
+## Privacy
 
-Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+PieDF non invia dati in rete. L'unico collegamento verso l'esterno è l'apertura di un link contenuto in un PDF (nel browser o nel programma di posta), solo dopo il clic e la conferma dell'indirizzo.
 
-Only the files built by the "Release" workflow from the source code of this repository are signed, and every release is approved by hand before signing.
-
-- Committers and reviewers: [@dellaluca](https://github.com/dellaluca). Changes proposed by the repository's automated assistants are opened as pull requests and reviewed by a committer before merging.
-- Approvers: [@dellaluca](https://github.com/dellaluca).
-
-**Privacy policy**: This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. The only outgoing action is opening a web or e-mail link contained in a PDF, in the default browser or mail client, after the user clicks it and confirms the address.
-
-*In italiano*: gli exe delle Release sono firmati gratuitamente da SignPath Foundation, così Windows riconosce chi li pubblica. Si firma solo quello che viene costruito da questo codice e ogni versione è approvata a mano. PieDF non invia dati in rete: l'unico collegamento verso l'esterno è l'apertura di un link contenuto in un PDF, dopo il clic e la conferma dell'indirizzo.
+*Privacy policy*: this program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
 
 ## Licenza
 
