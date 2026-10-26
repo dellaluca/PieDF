@@ -12,7 +12,7 @@ Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa
 
 - **Leggere**: scorrimento continuo, zoom, pannello laterale con le miniature delle pagine e l'indice del documento, link cliccabili. Riapre ogni file alla pagina dove l'avevi lasciato.
 - **Cercare e copiare**: trova una parola in tutto il documento e seleziona il testo per copiarlo.
-- **Firmare**: crea la tua firma (o le iniziali) disegnandola, scrivendola in corsivo o da una foto, e mettila dove serve. Le firme restano salvate per le volte successive.
+- **Firmare**: crea la tua firma (o le iniziali) disegnandola, scrivendola in corsivo o da una foto, e mettila dove serve. Le firme restano salvate per le volte successive, e da «Le mie firme» puoi importare quelle di un'altra cartella di PieDF.
 - **Compilare i moduli**: caselle di testo, spunte e scelte dei moduli PDF.
 - **Scrivere e disegnare**: aggiungi caselle di testo, la data, tratti a mano libera ed evidenziazioni, modificabili anche dopo il salvataggio.
 - **Organizzare le pagine**: riordina, ruota, elimina pagine, inserisci pagine da altri PDF ed estraine una parte in un file nuovo.
@@ -28,7 +28,7 @@ Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa
 2. Avvia `PieDF\PieDF.exe`. Non c'è niente da installare.
 3. La prima volta Windows può mostrare «PC protetto da Windows»: PieDF non ha ancora una firma digitale, quindi Windows non ne conosce l'autore. Clicca **Ulteriori informazioni** → **Esegui comunque**. Il codice di ogni versione è pubblico in questo repository.
 
-Le tue firme e le impostazioni stanno nella cartella `PieDF\data`: copiando la cartella di PieDF te le porti dietro. Se PieDF è in una cartella dove non può scrivere, le salva in `%APPDATA%\PieDF`.
+Le tue firme e le impostazioni stanno nella cartella `PieDF\data`: copiando la cartella di PieDF te le porti dietro. Se PieDF è in una cartella dove non può scrivere, le salva in `%APPDATA%\PieDF`. Una versione nuova, al primo avvio, propone di copiare firme e impostazioni dalla precedente.
 
 **Aprire i PDF con PieDF**: tasto destro su un PDF → *Apri con* → *Scegli un'altra app* → *Cerca un'altra app in questo PC* e scegli `PieDF.exe`. Spuntando *Usa sempre quest'app* PieDF diventa il lettore predefinito. Puoi anche trascinare un PDF sull'icona di PieDF o nella finestra.
 

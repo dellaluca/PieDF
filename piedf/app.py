@@ -19,6 +19,7 @@ def main(argv: list[str]) -> int:
 
     window = MainWindow()
     window.show()
+    window.offer_previous_data()
 
     # Il primo argomento non-opzione è il file da aprire ("Apri con" di Windows).
     files = [a for a in app.arguments()[1:] if not a.startswith("-")]

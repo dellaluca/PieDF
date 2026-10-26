@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
-from piedf import paths
+from piedf import data_import, paths
 from piedf.annotations import (
     COLORS,
     DEFAULT_DRAW,
@@ -58,7 +58,7 @@ from piedf.renderer import Renderer
 from piedf.search_bar import SearchBar
 from piedf.sidebar import PAGES_TAB, TOC_TAB, Sidebar
 from piedf.signature_dialog import SignatureDialog
-from piedf.signature_manager import SignatureManager, thumbnail_pixmap
+from piedf.signature_manager import SignatureManager, choose_data_folder, thumbnail_pixmap
 from piedf.signatures import Kind, Signature, SignatureStore
 from piedf.viewer import FitMode, PdfView
 from piedf.writer import SaveError, has_digital_signatures, save_with_signatures
@@ -1341,6 +1341,51 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(saved, 5000)
             return dialog.saved
         return None
+
+    def offer_previous_data(self) -> bool:
+        """Al primo avvio di una versione nuova propone di copiare i dati della precedente.
+        True se ha copiato qualcosa."""
+        data = paths.data_dir()
+        if (not paths.is_frozen() or os.environ.get("PIEDF_NO_DATA_IMPORT")
+                or (data / data_import.SETTINGS).exists() or any((data / "firme").glob("*.png"))):
+            return False
+        source = data_import.find_previous(paths.base_dir(), data, paths.appdata_dir())
+        while source is not None:
+            answer = self._ask_copy_data(source)
+            if answer == "copy":
+                try:
+                    data_import.copy_data(source, data)
+                except OSError as e:
+                    QMessageBox.warning(self, "Copia dei dati", f"Impossibile copiare i dati: {e}")
+                    return False
+                self._settings.sync()  # rilegge il settings.ini copiato
+                self._positions.reload()
+                self.statusBar().showMessage("Dati copiati dalla versione precedente.", 5000)
+                return True
+            if answer == "other":
+                source = choose_data_folder(self)
+                continue
+            self._settings.setValue(data_import.SKIP_KEY, True)
+            self._settings.sync()
+            return False
+        return False
+
+    def _ask_copy_data(self, source: Path) -> str:
+        """Dialog di copia: "copy", "other" o "no"."""
+        version = data_import.exe_version(source)
+        where = source.parent if source.name == "data" else source
+        name = f"PieDF {version}" if version else "PieDF"
+        box = QMessageBox(QMessageBox.Icon.Question, "Dati di PieDF",
+                          f"Ho trovato i dati di {name} in {where}: {data_import.summarize(source).describe()}.\n\n"
+                          "Copiarli in questa versione?", parent=self)
+        copy = box.addButton("Copia", QMessageBox.ButtonRole.AcceptRole)
+        other = box.addButton("Scegli un'altra cartella…", QMessageBox.ButtonRole.ActionRole)
+        no = box.addButton("No", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(copy)
+        box.setEscapeButton(no)
+        box.exec()
+        clicked = box.clickedButton()
+        return "copy" if clicked is copy else "other" if clicked is other else "no"
 
     def manage_signatures(self) -> None:
         SignatureManager(self.signatures, self).exec()

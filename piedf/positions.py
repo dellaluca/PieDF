@@ -44,6 +44,11 @@ class Positions:
         self._entries = {}
         self._write()
 
+    def reload(self) -> None:
+        """Rilegge il file (dopo aver copiato i dati di un'altra versione)."""
+        self._entries = {}
+        self._load()
+
     def _load(self) -> None:
         try:
             data = json.loads(self._file.read_text(encoding="utf-8"))
