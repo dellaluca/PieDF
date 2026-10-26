@@ -176,9 +176,10 @@ def main():
     s = width / src_doc[0].rect.width
     ref = src_doc[0].get_pixmap(matrix=pymupdf.Matrix(s, s), alpha=False)
     src_doc.close()
-    sample = range(0, min(len(data), len(ref.samples)), 7)
-    err = sum(abs(data[i] - ref.samples[i]) for i in sample) / len(sample)
-    far = sum(1 for i in sample if abs(data[i] - ref.samples[i]) > 32) / len(sample)
+    ref_data = ref.samples  # Pixmap.samples copia tutti i byte a ogni lettura
+    sample = range(0, min(len(data), len(ref_data)), 7)
+    err = sum(abs(data[i] - ref_data[i]) for i in sample) / len(sample)
+    far = sum(1 for i in sample if abs(data[i] - ref_data[i]) > 32) / len(sample)
     check("1. risoluzione del render, nessuna perdita visibile",
           (width, height) == (ref.width, ref.height) and err < 0.5 and far < 0.001,
           f"{width}x{height}, errore medio {err:.2f}, {far * 100:.3f}% oltre 32")
