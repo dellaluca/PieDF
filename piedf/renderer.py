@@ -1,7 +1,7 @@
 import multiprocessing
 import threading
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QCoreApplication, QObject, QThread, Signal
 from PySide6.QtGui import QImage
 
 from piedf import render_worker
@@ -51,6 +51,10 @@ class Renderer(QObject):
         self._reader.search_hits.connect(self.search_hits)
         self._reader.search_done.connect(self.search_done)
         self._reader.start()
+        self._shut_down = False
+        app = QCoreApplication.instance()
+        if app is not None:  # se l'applicazione esce senza closeEvent: mai un QThread vivo all'uscita
+            app.aboutToQuit.connect(self.shutdown)
 
     def _start_process(self) -> None:
         self._process = self._ctx.Process(
@@ -150,6 +154,9 @@ class Renderer(QObject):
             self._requests.put(msg)
 
     def shutdown(self) -> None:
+        if self._shut_down:
+            return
+        self._shut_down = True
         self._requests.put(("quit",))
         self._results.put(None)
         self._reader.wait(2000)
