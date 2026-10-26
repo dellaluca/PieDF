@@ -42,6 +42,10 @@ Si distribuisce la versione a cartella (onedir) dentro lo zip: il onefile si sco
 
 Le immagini in `docs/img/` le genera `python tools/screenshots.py`, sui PDF di prova di `tests/make_test_pdfs.py`. Rigenerale quando l'interfaccia cambia in modo visibile.
 
+## Logo e icona
+
+Il logo è `piedf/assets/piedf.svg`. L'icona di finestra ed exe (`piedf/assets/piedf.ico`, 10 dimensioni da 16 a 256 px) si rigenera con `python tools/make_icon.py` ogni volta che il logo cambia.
+
 ## Pubblicare una versione
 
 1. Aggiorna `__version__` in `piedf/__init__.py` con una PR e uniscila.
