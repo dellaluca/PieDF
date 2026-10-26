@@ -52,6 +52,8 @@ La stampa (#25) usa un secondo processo, `print_pages`, che non tocca quello del
 visibili e stampa il file così com'è, annotazioni di PieDF comprese.
 Le miniature di "Organizza pagine" (#26) un altro ancora, `thumbnails`, che apre anche i
 file inseriti e li disegna così come sono, annotazioni di PieDF comprese.
+La copia del testo (#49) legge le parole delle pagine che la vista non ha ancora in un
+processo suo, `copy_words`.
 """
 
 import math
@@ -303,6 +305,33 @@ def thumbnails(requests, results) -> None:
             results.put(("thumb", sid, page, pix.width, pix.height, pix.stride, pix.samples))
         except Exception as e:
             results.put(("error", sid, page, str(e)))
+
+
+def copy_words(path, password, pages, conn) -> None:
+    """Processo della copia del testo (#49): parole delle pagine `pages` che la vista non ha ancora.
+
+    In uscita, sul lato in scrittura di una `Pipe`: ("words", pagina, parole) per ogni pagina,
+    come il messaggio "words" di `run`, poi ("done",); oppure ("error", messaggio).
+    Una pipe e non una coda: la GUI non tiene il lato in scrittura, quindi se questo processo
+    muore (anche a metà di un messaggio) chi legge riceve EOF e non resta bloccato.
+    Per annullare la GUI chiude il processo.
+    """
+    import pymupdf
+
+    try:
+        doc = pymupdf.open(path)
+        if doc.needs_pass and not doc.authenticate(password or ""):
+            raise ValueError("Password errata")
+        for page in pages:
+            conn.send(("words", page, _words(doc[page])))
+        conn.send(("done",))
+    except Exception as e:
+        try:
+            conn.send(("error", str(e)))
+        except OSError:
+            pass  # la GUI non legge più (copia annullata, GUI chiusa)
+    finally:
+        conn.close()
 
 
 def _search(page, text: str, case: bool, check_text: bool) -> tuple[list[tuple], bool]:

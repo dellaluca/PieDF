@@ -74,6 +74,8 @@ TEXT_HINT = "Clic sulla pagina per scrivere · Esc per annullare"
 DATE_HINT = "Clic sulla pagina per inserire la data · Esc per annullare"
 DRAW_HINT = "Trascina sulla pagina per disegnare · Esc per finire"
 ERASER_HINT = "Clic o trascina su un tratto per cancellarlo · Esc per finire"
+COPY_HINT = "Copia del testo…"
+COPY_DIALOG_MS = 500  # una copia che dura di più mostra l'avanzamento, con Annulla
 ALIGN_LABELS = ["Sinistra", "Centro", "Destra"]
 FORM_MESSAGE = "Questo documento contiene campi compilabili."
 XFA_MESSAGE = "Questo modulo usa una tecnologia (XFA) che PieDF non supporta: i campi non si possono compilare."
@@ -129,6 +131,13 @@ class MainWindow(QMainWindow):
         self._back: list[tuple[int, float]] = []
         self._forward: list[tuple[int, float]] = []
         self._print_job: PrintJob | None = None
+        self._copy_done = (0, 0)  # pagine lette e da leggere dalla copia in corso
+        # Copia del testo in corso (#49): avanzamento, mostrato dopo COPY_DIALOG_MS.
+        self._copy_dialog: QProgressDialog | None = None
+        self._copy_timer = QTimer(self)
+        self._copy_timer.setSingleShot(True)
+        self._copy_timer.setInterval(COPY_DIALOG_MS)
+        self._copy_timer.timeout.connect(self._show_copy_dialog)
 
         self._renderer = Renderer(self)
         self._renderer.failed.connect(self._on_render_failed)
@@ -146,6 +155,9 @@ class MainWindow(QMainWindow):
         self.view.text_style = self._text_style()
         self.view.draw_style = self._draw_style()
         self.view.draw_tool_changed.connect(self._on_draw_tool_changed)
+        self.view.copy_busy.connect(self._on_copy_busy)
+        self.view.copy_progress.connect(self._on_copy_progress)
+        self.view.copy_failed.connect(self._on_copy_failed)
         self.view.set_highlight(self._settings.value("highlight_fields", True, type=bool))
         self.search_bar = SearchBar(self.view, self._renderer, self.annotations)
         self.search_bar.show_hit.connect(self._show_search_hit)
@@ -715,7 +727,7 @@ class MainWindow(QMainWindow):
         self._save_path = save_path
         self._original = original
         self._renderer.open(self._gen, path, doc.password)
-        self.view.set_document(self._gen, doc.page_sizes)
+        self.view.set_document(self._gen, doc.page_sizes, path, doc.password)
         self.sidebar.set_document(self._gen, doc.page_sizes, doc.toc)
         self.sidebar.set_current(self.view.current_page)
         self.forms.set_fields(doc.fields)
@@ -824,6 +836,47 @@ class MainWindow(QMainWindow):
         elif self.view.editor is None:
             self.view.select_all_text()
 
+    def _on_copy_busy(self, busy: bool) -> None:
+        if busy:
+            QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+            self.statusBar().showMessage(COPY_HINT)
+            self._copy_timer.start()
+            return
+        QApplication.restoreOverrideCursor()
+        self._copy_timer.stop()
+        if self.statusBar().currentMessage() == COPY_HINT:
+            self.statusBar().clearMessage()
+        if self._copy_dialog is not None:
+            dialog, self._copy_dialog = self._copy_dialog, None
+            dialog.canceled.disconnect(self.view.cancel_copy)
+            dialog.close()
+            dialog.deleteLater()
+
+    def _show_copy_dialog(self) -> None:
+        if not self.view.copying or self._copy_dialog is not None:
+            return
+        dialog = QProgressDialog(COPY_HINT, "Annulla", 0, 1, self)
+        dialog.setWindowTitle("Copia")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setMinimumDuration(0)
+        dialog.canceled.connect(self.view.cancel_copy)
+        self._copy_dialog = dialog
+        dialog.show()
+        self._on_copy_progress(*self._copy_done)
+
+    def _on_copy_progress(self, done: int, total: int) -> None:
+        self._copy_done = (done, total)
+        dialog = self._copy_dialog
+        if dialog is not None:
+            dialog.setLabelText(f"Copia del testo: {done} pagine lette su {total}…")
+            dialog.setMaximum(total)
+            dialog.setValue(done)  # modale: elabora gli eventi, la copia può finire qui dentro
+
+    def _on_copy_failed(self) -> None:
+        QMessageBox.warning(self, "Copia non riuscita", "Impossibile copiare il testo.")
+
     # --- Link e cronologia -----------------------------------------------------------
 
     def _follow_link(self, page: int, y: float) -> None:
@@ -911,6 +964,7 @@ class MainWindow(QMainWindow):
 
     def _save_to(self, dest: str) -> bool:
         self.view.commit_editor()
+        self.view.cancel_copy()  # il processo della copia tiene aperto il file
         if has_digital_signatures(self._path, self._password):
             Button = QMessageBox.StandardButton
             box = QMessageBox(
@@ -1380,6 +1434,7 @@ class MainWindow(QMainWindow):
             self._print_job.wait()
         if self._page_job is not None:
             self._page_job.cancel()
+        self.view.cancel_copy()
         self._settings.sync()  # all'uscita Python può non distruggere QSettings
         self._renderer.shutdown()
         self._path = None

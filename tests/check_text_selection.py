@@ -1,4 +1,4 @@
-"""Controllo end-to-end della selezione e copia del testo (#15).
+"""Controllo end-to-end della selezione e copia del testo (#15), copia mai a metà (#49).
 
     python tests/make_test_pdfs.py
     set QT_QPA_PLATFORM=offscreen
@@ -17,10 +17,10 @@ PDFS = S / "pdfs"
 
 def main():
     import pymupdf
-    from PySide6.QtCore import QPoint, QRectF, Qt
+    from PySide6.QtCore import QPoint, QRectF, Qt, QTimer
     from PySide6.QtGui import QColor, QImage
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QLineEdit
+    from PySide6.QtWidgets import QApplication, QLineEdit, QMessageBox, QPushButton
 
     import piedf.paths as paths
     data = S / "data_text_selection"
@@ -29,8 +29,9 @@ def main():
     paths.data_dir = lambda: data
 
     from piedf.annotations import PEN
-    from piedf.main_window import MainWindow
+    from piedf.main_window import COPY_HINT, MainWindow
     from piedf.signatures import Kind
+    from piedf.text_selection import END
 
     app = QApplication(["t"])
     results = []
@@ -49,6 +50,9 @@ def main():
         while not cond() and time.perf_counter() - t < sec:
             app.processEvents(); time.sleep(0.01)
         return cond()
+
+    warnings = []
+    QMessageBox.warning = staticmethod(lambda parent, title, text, *a: warnings.append(text))
 
     w = MainWindow(); w.resize(1000, 800); w.show(); pump(0.2)
     v = w.view
@@ -77,10 +81,15 @@ def main():
         QTest.mouseClick(vp, L, NO, pos); app.processEvents()
 
     def key(k, mod=NO):
+        if QApplication.activeWindow() is not w:
+            # Offscreen, chiuso un dialog modale (avanzamento della copia) nessuna finestra torna
+            # attiva e le scorciatoie (Ctrl+C, Ctrl+A) non scatterebbero.
+            w.activateWindow(); v.setFocus(); app.processEvents()
         QTest.keyClick(vp, k, mod); app.processEvents()
 
     def copy():
         key(Qt.Key.Key_C, CTRL)
+        wait(lambda: not v.copying, 30)
         return clipboard.text()
 
     def words_ready(*pages):
@@ -228,9 +237,84 @@ def main():
     QTest.mouseClick(vp, L, NO, pos); app.processEvents()
     check("un clic dopo l'intervallo non è un triplo clic", v.selected_text() == "")
     key(Qt.Key.Key_A, CTRL)
-    check("4. Ctrl+A → tutto il testo della pagina corrente", v.selected_text() == joined(page0),
-          f"{len(v.selected_text())} / {len(joined(page0))}")
-    check("4. Ctrl+A: a capo a ogni riga (41 righe)", copy().count("\n") == 40, str(clipboard.text().count("\n")))
+    check("4. Ctrl+A → tutto il documento", v._ordered_selection() == ((0, 0), (349, END)), str(v._ordered_selection()))
+
+    # --- #49: Ctrl+A e subito Ctrl+C su 350 pagine: testo intero, appunti scritti una volta sola ---
+    doc = pymupdf.open(PDFS / "lungo_350.pdf")
+    whole = "\n".join(joined([tuple(x) for x in page.get_text("words", sort=True)]) for page in doc)
+    doc.close()
+    writes = []
+    clipboard.dataChanged.connect(lambda: writes.append(clipboard.text()))
+    clipboard.setText("prima")
+    writes.clear()
+    started = time.perf_counter()
+    key(Qt.Key.Key_C, CTRL)
+    check("#49 Ctrl+C con pagine da leggere: copia in corso", v.copying)
+    check("#49 durante la copia: cursore di attesa", QApplication.overrideCursor() is not None
+          and QApplication.overrideCursor().shape() == Qt.CursorShape.BusyCursor)
+    check("#49 durante la copia: «Copia del testo…» nella barra di stato", w.statusBar().currentMessage() == COPY_HINT,
+          repr(w.statusBar().currentMessage()))
+    check("#49 appunti invariati finché mancano pagine", clipboard.text() == "prima" and not writes)
+    dialog_seen = []
+    wait(lambda: dialog_seen.append(w._copy_dialog is not None and w._copy_dialog.isVisible()) or not v.copying, 60)
+    elapsed = time.perf_counter() - started
+    text = clipboard.text()
+    check("#49 Ctrl+A + Ctrl+C: tutto il testo, uguale a quello di PyMuPDF", text == whole,
+          f"{len(text)} / {len(whole)} caratteri in {elapsed:.1f} s")
+    check("#49 «Pagina 1 di 350» … «Pagina 350 di 350», in ordine",
+          text.startswith("Pagina 1 di 350") and 0 < text.find("Pagina 350 di 350") and text.find("Pagina 2 di 350") < text.find("Pagina 350 di 350"))
+    check("#49 appunti scritti una volta sola", len(writes) == 1, str(len(writes)))
+    check("#49 oltre 0,5 s compare l'avanzamento", any(dialog_seen) or elapsed < 0.6, f"{elapsed:.2f} s")
+    check("#49 finita la copia: niente cursore di attesa, niente avanzamento, barra di stato pulita",
+          QApplication.overrideCursor() is None and w._copy_dialog is None and w.statusBar().currentMessage() != COPY_HINT)
+
+    # Copia annullata con Esc, con Annulla dell'avanzamento e con una nuova selezione: appunti invariati.
+    def cancelled(name, cancel):
+        clipboard.setText("prima")
+        writes.clear()
+        key(Qt.Key.Key_C, CTRL)
+        job = v._copy
+        ok = v.copying
+        cancel()
+        ok = ok and not v.copying and not job.process.is_alive()
+        pump(1.0)  # niente arriva più tardi
+        check(f"#49 copia annullata ({name}): appunti invariati", ok and clipboard.text() == "prima" and not writes,
+              repr(clipboard.text()[:30]))
+
+    cancelled("Esc", lambda: key(Qt.Key.Key_Escape))
+    check("#49 Esc annulla la copia ma la selezione resta", v._ordered_selection() == ((0, 0), (349, END)))
+
+    def cancel_dialog():
+        w._show_copy_dialog()  # come dopo COPY_DIALOG_MS, senza dipendere da quanto dura la copia
+        w._copy_dialog.findChild(QPushButton).click(); app.processEvents()
+
+    cancelled("Annulla dell'avanzamento", cancel_dialog)
+    check("#49 dopo Annulla niente cursore di attesa né avanzamento", QApplication.overrideCursor() is None and w._copy_dialog is None)
+    cancelled("nuova selezione", lambda: click(at(0, 400, 600)))
+    key(Qt.Key.Key_A, CTRL)
+    cancelled("chiusura del documento", lambda: w.close_document())
+    w.open_file(str(PDFS / "lungo_350.pdf"))
+    key(Qt.Key.Key_A, CTRL)
+    cancelled("apertura di un altro documento", lambda: w.open_file(str(PDFS / "lungo_350.pdf")))
+    check("#49 nessun messaggio d'errore annullando", not warnings, str(warnings))
+
+    # Il processo della copia muore a metà: messaggio, niente testo parziale.
+    key(Qt.Key.Key_A, CTRL)
+    clipboard.setText("prima")
+    writes.clear()
+    key(Qt.Key.Key_C, CTRL)
+    job = v._copy
+    wait(lambda: w._copy_done[0] > 0 or not v.copying, 30)
+    check("#49 processo della copia ucciso a metà", v.copying and 0 < w._copy_done[0] < w._copy_done[1],
+          str(w._copy_done))
+    job.process.kill()
+    wait(lambda: not v.copying, 10)
+    check("#49 processo morto: «Impossibile copiare il testo»", not v.copying and warnings == ["Impossibile copiare il testo."],
+          str(warnings))
+    check("#49 processo morto: appunti invariati", clipboard.text() == "prima" and not writes, repr(clipboard.text()[:30]))
+    warnings.clear()
+    reopened = len(requests)  # il documento è stato riaperto: le pagine si richiedono da capo
+    v.set_scroll_position(0, 0.0)
 
     # --- 3. dal fondo di pagina 10 all'inizio di pagina 11 ---
     v.set_scroll_position(9, 600.0)
@@ -246,6 +330,13 @@ def main():
     # Trascinando sotto la vista, la vista scorre e la selezione la segue.
     v.set_scroll_position(20, 0.0)
     check("pagina 21 pronta", words_ready(20))
+
+    # Le parole arrivano dal processo di render con 1 s di ritardo (#49): la copia non dipende dai tempi.
+    def slow(gen, page):
+        requests.append((page, page in v._visible_range()))
+        QTimer.singleShot(1000, lambda: real(gen, page))
+
+    w._renderer.request_words = slow
     vbar = v.verticalScrollBar()
     value = vbar.value()
     a = at(20, 73, 116)  # riga 1
@@ -261,12 +352,23 @@ def main():
     value = vbar.value()
     pump(0.2)
     check("rilasciato il tasto non scorre più", vbar.value() == value)
-    text = copy()
+    missing = [p for p in range(sel[0][0], sel[1][0] + 1) if p not in v._words] if sel else []
+    clipboard.setText("prima")
+    key(Qt.Key.Key_C, CTRL)
+    check("#49 parole di qualche pagina non ancora arrivate: appunti invariati", missing and clipboard.text() == "prima",
+          f"mancano {missing}")
+    wait(lambda: not v.copying, 30)
+    text = clipboard.text()
+    end = v._ordered_selection()[1] if v._ordered_selection() else None
+    check("#49 la fine della selezione stimata senza parole diventa quella del mouse", end is not None and end > sel[1]
+          and v._selection_guess == (None, None), f"{sel[1]} → {end}")
     check("selezione su più pagine copiata, con le pagine in ordine",
-          text.startswith("Riga 1: lorem") and "Pagina 22 di 350" in text, repr(text[:40]))
+          text.startswith("Riga 1: lorem") and f"Pagina {sel[1][0] + 1} di 350" in text and "Pagina 22 di 350" in text,
+          repr(text[:40]))
     check("parole chieste solo per le pagine visibili (o della selezione)",
           requests and all(vis for _, vis in requests[:5]), str(requests[:10]))
-    check("ogni pagina chiesta una volta sola", len({p for p, _ in requests}) == len(requests), str(sorted(requests)))
+    fresh = requests[reopened:]
+    check("ogni pagina chiesta una volta sola", len({p for p, _ in fresh}) == len(fresh), str(sorted(fresh)))
     w._renderer.request_words = real
 
     # Link: un clic lo segue, trascinando dal link si seleziona.
@@ -291,7 +393,9 @@ def main():
     QTest.mouseDClick(vp, L, NO, pos); app.processEvents()
     check("pagina ruotata: doppio clic → «Pagina»", v.selected_text() == "Pagina", repr(v.selected_text()))
     key(Qt.Key.Key_A, CTRL)
-    check("pagina ruotata: Ctrl+A → «Pagina ruotata»", v.selected_text() == "Pagina ruotata", repr(v.selected_text()))
+    text = copy()
+    check("pagina ruotata: Ctrl+A → tutto, finisce con «Pagina ruotata»",
+          text.startswith("Modulo di prova") and text.endswith("\nPagina ruotata"), repr(text))
     v.go_to_page(0)
     words_ready(0)
     drag(at(0, 275, 110), at(0, 80, 154))
