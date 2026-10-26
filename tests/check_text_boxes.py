@@ -21,7 +21,7 @@ SHOTS = S / "shots"
 def main():
     import pymupdf
     from PySide6.QtCore import QDate, QPoint, QPointF, QRectF, Qt
-    from PySide6.QtGui import QColor
+    from PySide6.QtGui import QColor, QFontDatabase
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox, QPlainTextEdit
 
@@ -473,6 +473,11 @@ def main():
     choice = next((f for f in ("Georgia", "Segoe UI", "DejaVu Serif", "Liberation Serif", "DejaVu Sans")
                    if f in installed), None)
     check("11. un font installato da provare", choice is not None, str(sorted(installed)))
+    if choice not in QFontDatabase.families():
+        # Qt offscreen su Windows non vede i font di sistema (la piattaforma vera sì): il menu
+        # mostra solo quelli che conosce QFontDatabase, quindi si registra il file del font scelto.
+        QFontDatabase.addApplicationFont(str(installed[choice]))
+    check("11. Qt conosce il font da provare", choice in QFontDatabase.families(), str(QFontDatabase.families()[:20]))
     t = time.perf_counter()
     w._fill_font_box()
     elapsed = time.perf_counter() - t
