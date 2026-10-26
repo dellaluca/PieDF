@@ -8,8 +8,9 @@
 # (GITHUB_TOKEN) non fanno partire workflow: per quelli il build lo avvia
 # l'esecutore stesso con workflow_dispatch.
 #
-# Dopo i controlli costruisce l'exe (PyInstaller), lo prova con check_exe.py
-# e allega lo zip alla run: si scarica dalla pagina della run per provarlo.
+# Dopo i controlli costruisce l'exe (PyInstaller) e lo prova con check_exe.py.
+# Lo zip non si allega: gli artifact di un repo pubblico li scarica chiunque, e la
+# versione compilata si vende a parte. Per provarlo: python tools/build_exe.py.
 name: "Build"
 
 on:
@@ -81,13 +82,6 @@ jobs:
             { echo "**tests/check_exe.py**"; echo '```'; grep -E "^FAIL|Traceback|Error" esito.txt | head -20; echo '```'; } >> fallimenti.md
             exit 1
           fi
-
-      - name: Allega lo zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: PieDF-win64
-          path: dist/PieDF-*-win64.zip
-          retention-days: 14
 
       # Per il job "ritenta": l'elenco dei controlli falliti.
       - name: Salva i fallimenti

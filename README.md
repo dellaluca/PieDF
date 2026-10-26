@@ -2,11 +2,9 @@
 
 Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa i tuoi PDF, compila i moduli e firma i documenti con la tua firma, senza installare niente. Gratuito e libero.
 
-**[⬇ Scarica PieDF per Windows](https://github.com/dellaluca/PieDF/releases/latest/download/PieDF-win64.zip)** (ultima versione, zip)
-
 ![PieDF con un documento aperto e il pannello delle pagine](docs/img/lettura.png)
 
-> **English** — PieDF is a lightweight, portable PDF reader for Windows 10/11. It opens, searches and prints PDFs, fills in PDF forms, lets you sign documents with a drawn, typed or image signature, adds editable text boxes and freehand drawings, and reorganizes pages (reorder, rotate, insert, extract, delete). No installer: unzip and run `PieDF.exe`; to uninstall, delete the folder. Free software under the [AGPL-3.0](LICENSE). Download: [PieDF-win64.zip](https://github.com/dellaluca/PieDF/releases/latest/download/PieDF-win64.zip) (latest version) · [all releases](https://github.com/dellaluca/PieDF/releases)
+> **English** — PieDF is a lightweight, portable PDF reader for Windows 10/11. It opens, searches and prints PDFs, fills in PDF forms, lets you sign documents with a drawn, typed or image signature, adds editable text boxes and freehand drawings, and reorganizes pages (reorder, rotate, insert, extract, delete). No installer: unzip and run `PieDF.exe`; to uninstall, delete the folder. Free software under the [AGPL-3.0](LICENSE). The ready-to-use build will be available as a paid download; the source code is free and you can build it yourself ([docs/sviluppo.md](docs/sviluppo.md)).
 
 ## Cosa fa
 
@@ -24,7 +22,7 @@ Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa
 
 ## Scaricare e usare
 
-1. [Scarica lo zip](https://github.com/dellaluca/PieDF/releases/latest/download/PieDF-win64.zip) (oppure una versione precedente dalle [Release](https://github.com/dellaluca/PieDF/releases)) e scompattalo dove vuoi: Documenti, Desktop, una chiavetta USB.
+1. Procurati lo zip di PieDF (vedi [Versione pronta o codice libero](#versione-pronta-o-codice-libero)) e scompattalo dove vuoi: Documenti, Desktop, una chiavetta USB.
 2. Avvia `PieDF\PieDF.exe`. Non c'è niente da installare.
 3. La prima volta Windows può mostrare «PC protetto da Windows»: PieDF non ha ancora una firma digitale, quindi Windows non ne conosce l'autore. Clicca **Ulteriori informazioni** → **Esegui comunque**. Il codice di ogni versione è pubblico in questo repository.
 
@@ -33,6 +31,13 @@ Le tue firme e le impostazioni stanno nella cartella `PieDF\data`: copiando la c
 **Aprire i PDF con PieDF**: tasto destro su un PDF → *Apri con* → *Scegli un'altra app* → *Cerca un'altra app in questo PC* e scegli `PieDF.exe`. Spuntando *Usa sempre quest'app* PieDF diventa il lettore predefinito. Puoi anche trascinare un PDF sull'icona di PieDF o nella finestra.
 
 **Disinstallare**: cancella la cartella di PieDF (e `%APPDATA%\PieDF`, se esiste).
+
+## Versione pronta o codice libero
+
+PieDF è software libero e lo resta: il codice è tutto qui, con la licenza [AGPL-3.0](LICENSE).
+
+- **Versione pronta all'uso** (a pagamento, in arrivo): lo zip con `PieDF.exe` già compilato e provato su Windows, da scompattare e avviare. Comprarla è anche il modo più semplice per sostenere il progetto.
+- **Codice libero** (gratis): puoi compilare PieDF da te con Python 3.12 seguendo [docs/sviluppo.md](docs/sviluppo.md#costruire-lexe); il risultato è lo stesso. Il codice di ogni versione è nelle [Release](https://github.com/dellaluca/PieDF/releases).
 
 ## Scorciatoie
 
