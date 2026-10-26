@@ -17,10 +17,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 S = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parent / "out"
 PDFS = S / "pdfs"
+# Quante volte si ripete la stampa di 50 pagine a 600 dpi (6 e 8). TEMPORANEO (#47): 5 per avere
+# dal build della PR i tempi di più giri sul runner Windows; poi si torna a 1.
+RUNS_50 = 5
 SHOTS = S / "shots"
 
 
 def main():
+    started = time.perf_counter()
     import pymupdf
     from PySide6.QtCore import QRectF, Qt, QTimer
     from PySide6.QtGui import QColor, QImage, QPageLayout, QPageRanges, QPageSize, QPainter, QPen
@@ -314,40 +318,51 @@ def main():
         name = max(cover, key=cover.get, default="nessun passo")
         return f"{(b - a) * 1000:.0f} ms, durante: {name} ({cover.get(name, 0) * 1000:.0f} ms)"
 
-    t0 = time.perf_counter()
-    timer.start()
-    w.print_document()
-    steps = w._print_job._thread.steps
-    page_times = {}
-    w._print_job.progress.connect(lambda n, total: page_times.setdefault(n, time.perf_counter()))
-    done = wait_print(limit=400, on_pump=sample)
-    timer.stop()
-    secs = time.perf_counter() - t0
-    # Fino alla penultima pagina: alla fine QPdfEngine (la "stampante" PDF del test) chiude il
-    # file in painter.end() tenendo il GIL; con una stampante vera end() è EndDoc di Windows.
-    until = page_times.get(49, time.perf_counter())
-    spans = [(a, b) for a, b in zip(ticks, ticks[1:]) if b <= until]
-    end_spans = [(a, b) for a, b in zip(ticks, ticks[1:]) if b > until]
-    gaps = [b - a for a, b in spans]
-    check("6. 50 pagine stampate", done and len(images(out)) == 50, f"{secs:.1f} s")
-    check("6. pausa massima della GUI < 150 ms", gaps and max(gaps) < 0.150, blame(spans))
-    print(f"INFO pausa massima dopo la pagina 49 (ultima pagina e chiusura del PDF): {blame(end_spans)}", flush=True)
-    longest = {}
-    for name, s, e in steps:
-        if name != "ricezione":  # è soprattutto attesa del render, senza GIL
-            longest[name] = max(longest.get(name, 0), e - s)
-    print("INFO passo più lungo: " + ", ".join(f"{name} {sec * 1000:.0f} ms" for name, sec in
-                                               sorted(longest.items(), key=lambda x: -x[1])), flush=True)
-    bands = sorted(e - s for name, s, e in steps if name == "disegno")
-    if bands:
-        print(f"INFO strisce: {len(bands)}, mediana {bands[len(bands) // 2] * 1000:.1f} ms", flush=True)
-    check("6. avanzamento «Stampa pagina N di 50…»", "Stampa pagina 12 di 50…" in labels, f"{len(labels)} testi")
-    if proc:
-        grow = (peak[0] - base) / 2**20
-        check("8. memoria della GUI < 400 MB in più", grow < 400, f"+{grow:.0f} MB")
-    else:
-        skip("8. memoria", "psutil non installato")
-    out.unlink()  # circa 100 MB
+    for run in range(RUNS_50):
+        lap = f" (giro {run + 1}/{RUNS_50})" if RUNS_50 > 1 else ""
+        if run and time.perf_counter() - started > 400:  # il timeout di run_all è 600 s
+            skip("6. altri giri", f"già {time.perf_counter() - started:.0f} s")
+            break
+        ticks.clear()
+        if proc:  # ogni giro dalla memoria del momento: l'allocatore non restituisce tutto
+            base = peak[0] = proc.memory_info().rss
+        t0 = time.perf_counter()
+        timer.start()
+        w.print_document()
+        steps = w._print_job._thread.steps
+        page_times = {}
+        w._print_job.progress.connect(lambda n, total: page_times.setdefault(n, time.perf_counter()))
+        done = wait_print(limit=400, on_pump=sample)
+        timer.stop()
+        secs = time.perf_counter() - t0
+        # Fino alla penultima pagina: alla fine QPdfEngine (la "stampante" PDF del test) chiude il
+        # file in painter.end() tenendo il GIL; con una stampante vera end() è EndDoc di Windows.
+        until = page_times.get(49, time.perf_counter())
+        spans = [(a, b) for a, b in zip(ticks, ticks[1:]) if b <= until]
+        end_spans = [(a, b) for a, b in zip(ticks, ticks[1:]) if b > until]
+        gaps = [b - a for a, b in spans]
+        check("6. 50 pagine stampate" + lap, done and len(images(out)) == 50, f"{secs:.1f} s")
+        check("6. pausa massima della GUI < 150 ms" + lap, gaps and max(gaps) < 0.150, blame(spans))
+        print(f"INFO pausa massima dopo la pagina 49 (ultima pagina e chiusura del PDF): {blame(end_spans)}", flush=True)
+        longest = {}
+        for name, s, e in steps:
+            if name != "ricezione":  # è soprattutto attesa del render, senza GIL
+                longest[name] = max(longest.get(name, 0), e - s)
+        print("INFO passo più lungo: " + ", ".join(f"{name} {sec * 1000:.0f} ms" for name, sec in
+                                                   sorted(longest.items(), key=lambda x: -x[1])), flush=True)
+        bands = sorted(e - s for name, s, e in steps if name == "disegno")
+        slow = sum(1 for b in spans if b[1] - b[0] > 0.050)
+        if bands:
+            print(f"INFO strisce: {len(bands)}, mediana {bands[len(bands) // 2] * 1000:.1f} ms; "
+                  f"pause oltre 50 ms: {slow}", flush=True)
+        check("6. avanzamento «Stampa pagina N di 50…»" + lap, "Stampa pagina 12 di 50…" in labels,
+              f"{len(labels)} testi")
+        if proc:
+            grow = (peak[0] - base) / 2**20
+            check("8. memoria della GUI < 400 MB in più" + lap, grow < 400, f"+{grow:.0f} MB")
+        else:
+            skip("8. memoria", "psutil non installato")
+        out.unlink()  # circa 100 MB
 
     # --- 6. Annulla dopo 5 pagine ---
     w.placements.add(Placement(0, sig_rect, sig.path, Kind.SIGNATURE))  # così c'è un temporaneo
@@ -448,8 +463,8 @@ def main():
     with open(log, "w") as f:  # un file e non una pipe: il processo di render la terrebbe aperta
         subprocess.run([sys.executable, str(script)], stdout=f, stderr=subprocess.STDOUT, timeout=60,
                        env=dict(os.environ, PYTHONPATH=root))
-    first = log.read_text().split("\n")[0]
-    orphan = int(first) if first.isdigit() else None
+    pids = [line for line in log.read_text().split("\n") if line.isdigit()]  # tra gli avvisi su stderr
+    orphan = int(pids[0]) if pids else None
     if orphan is None:
         check("GUI uccisa: processo di render partito", False, log.read_text()[-300:])
     elif psutil:

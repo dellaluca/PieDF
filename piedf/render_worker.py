@@ -57,9 +57,6 @@ def run(requests, results) -> None:
         while msg is not None:
             kind = msg[0]
             if kind == "quit":
-                # Le pagine non ancora lette non servono più: senza questo il processo
-                # aspetterebbe all'uscita che la GUI le legga.
-                results.cancel_join_thread()
                 return
             if kind == "open":
                 _, gen, path, password = msg
