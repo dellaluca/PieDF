@@ -15,6 +15,7 @@ Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa
 - **Scrivere e disegnare**: aggiungi caselle di testo, la data, tratti a mano libera ed evidenziazioni, modificabili anche dopo il salvataggio.
 - **Organizzare le pagine**: riordina, ruota, elimina pagine, inserisci pagine da altri PDF ed estraine una parte in un file nuovo.
 - **Stampare** quello che vedi, firme comprese.
+- **Informazioni**: dal menu Aiuto vedi la versione, la licenza e il link al codice sorgente.
 
 ![Una firma messa su un contratto](docs/img/firma.png)
 
@@ -59,7 +60,7 @@ PieDF è software libero e lo resta: il codice è tutto qui, con la licenza [AGP
 
 ## Privacy
 
-PieDF non invia dati in rete. L'unico collegamento verso l'esterno è l'apertura di un link contenuto in un PDF (nel browser o nel programma di posta), solo dopo il clic e la conferma dell'indirizzo.
+PieDF non invia dati in rete. L'unico collegamento verso l'esterno è l'apertura di un link contenuto in un PDF (nel browser o nel programma di posta), solo dopo il clic e la conferma dell'indirizzo (lo stesso vale per i link della finestra Informazioni).
 
 *Privacy policy*: this program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
 
