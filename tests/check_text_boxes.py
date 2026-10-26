@@ -36,7 +36,7 @@ def main():
 
     from piedf import render_worker
     from piedf.document import PIEDF_TITLE, TextBox, open_document
-    from piedf.main_window import DATE_HINT, TEXT_HINT, MainWindow
+    from piedf.main_window import DATE_HINT, FONT_FALLBACK, NOT_INSTALLED, TEXT_HINT, MainWindow
     from piedf.printing import print_source, remove_quietly
 
     app = QApplication(["t"])
@@ -435,6 +435,213 @@ def main():
     check("10. svuotata in modifica: sparisce", not model.items)
     key(Qt.Key.Key_Z, CTRL)
     check("10. Ctrl+Z: torna", model.items == [box] and box.text == "Svuotami")
+
+    # --- 11. Font installati sul PC, incorporati nel PDF (#59) ---
+    from pymupdf import mupdf
+
+    from piedf import fonts
+    from piedf.annotations import fitted_rect
+    from piedf.document import longest_word, text_box_height, text_box_lines
+
+    def box_font(path):
+        """(BaseFont, file del font incorporato) del font nell'aspetto della prima FreeText di PieDF."""
+        doc = pymupdf.open(path)
+        try:
+            for page in doc:
+                for a in page.annots(types=[pymupdf.PDF_ANNOT_FREE_TEXT]):
+                    ap = int(doc.xref_get_key(a.xref, "AP/N")[1].split()[0])
+                    kind, ref = doc.xref_get_key(ap, f"Resources/Font/{fonts.RESOURCE}")
+                    if kind != "xref":
+                        continue
+                    fx = int(ref.split()[0])
+                    cid = int(doc.xref_get_key(fx, "DescendantFonts")[1].strip("[] ").split()[0])
+                    desc = int(doc.xref_get_key(cid, "FontDescriptor")[1].split()[0])
+                    files = [k for k in ("FontFile2", "FontFile3") if doc.xref_get_key(desc, k)[0] == "xref"]
+                    return doc.xref_get_key(fx, "BaseFont")[1], bool(files)
+        finally:
+            doc.close()
+        return None
+
+    def choose_font(family):
+        index = w.font_box.findData(family)
+        w.font_box.setCurrentIndex(index)
+        w.font_box.activated.emit(index)
+        app.processEvents()
+
+    installed = fonts.installed()
+    # Georgia e Segoe UI ci sono in ogni Windows; altrove (il worker su Linux) un font libero.
+    choice = next((f for f in ("Georgia", "Segoe UI", "DejaVu Serif", "Liberation Serif", "DejaVu Sans")
+                   if f in installed), None)
+    check("11. un font installato da provare", choice is not None, str(sorted(installed)))
+    t = time.perf_counter()
+    w._fill_font_box()
+    elapsed = time.perf_counter() - t
+    check("11. elenco dei font costruito in meno di 100 ms", elapsed < 0.1, f"{elapsed * 1000:.0f} ms, {w.font_box.count()} voci")
+    items = [w.font_box.itemData(i) for i in range(w.font_box.count()) if w.font_box.itemData(i)]
+    recent = w._recent_fonts()
+    rest = items[len(recent) + 3:]
+    check("11. ordine: ultimi usati, Helvetica/Times/Courier, poi gli altri in ordine alfabetico",
+          items[:len(recent)] == recent and items[len(recent):len(recent) + 3] == ["Helv", "TiRo", "Cour"]
+          and rest == sorted(rest, key=str.casefold) and choice in rest, str(items[:12]))
+    index = w.font_box.findData(choice)
+    item_font = w.font_box.itemData(index, Qt.ItemDataRole.FontRole)
+    check("11. ogni font scritto nel suo font", item_font is not None and item_font.family() == choice)
+
+    src = copy("semplice.pdf", "font.pdf")
+    open_doc(src)
+    sample = "Città € 10"  # 10 caratteri
+    box = add_text(0, 100, 300, sample)
+    click(center(box))
+    choose_font(choice)
+    w.size_box.setValue(14)
+    w.color_box.setCurrentIndex(w.color_box.findData("#c00000")); w.color_box.activated.emit(w.color_box.currentIndex())
+    w.align_actions[1].trigger()
+    app.processEvents()
+    check("11. font scelto applicato alla casella", box.font == choice and box.size == 14, str(box))
+    check("11. tra gli ultimi usati, in cima all'elenco", w._recent_fonts()[0] == choice and w.font_box.itemData(0) == choice
+          and w._settings.value("text/recent_fonts", [], type=list)[0] == choice)
+    check("11. la vista disegna la casella col font scelto", inked_on_screen(box) > 20)
+    expected = (box.text, box.font, box.size, box.color, box.align)
+    out11 = work / "font_salvato.pdf"
+    check("11. salvataggio", save_as(out11) and not errors, str(errors))
+    font = box_font(out11)
+    check("11. 1: nel PDF il font è incorporato, in subset", font is not None and font[1]
+          and font[0].lstrip("/")[6:7] == "+" and choice.replace(" ", "")[:5] in font[0].replace("#20", ""), str(font))
+    check("11. 1: get_text estrae il testo uguale", sample in page_text(out11), repr(page_text(out11)))
+    added = out11.stat().st_size - (PDFS / "semplice.pdf").stat().st_size
+    check("11. 6: 10 caratteri nel font incorporato aggiungono meno di 200 KB", added < 200 * 1024, f"{added / 1024:.0f} KB")
+    check("11. il render del file salvato ha il testo", inked_in_file(out11, 0, box.rect) > 30)
+    box = model.items[0] if model.items else None
+    got = box and (box.text, box.font, box.size, box.color, box.align)
+    check("11. 2: riaperto: stesso font, dimensione, colore e allineamento", got == expected and box.embedded is not None,
+          f"{got} != {expected}")
+    click(center(box))
+    check("11. 2: il menu mostra il font", w.font_box.currentData() == choice and w.font_box.currentText() == choice)
+    double_click(center(box))
+    v.editor.selectAll()
+    write("Città € 11 nuovo")
+    key(Qt.Key.Key_Escape)
+    check("11. 2: modificabile, il font resta", box.text == "Città € 11 nuovo" and box.font == choice)
+    check("11. 2: salvato di nuovo", w.save() and not errors and "Città € 11 nuovo" in page_text(out11), str(errors))
+
+    # 3. La misura segue il font scelto.
+    word = "Precipitevolissimevolmente"
+    cour, other = longest_word(word, "Cour", 14), longest_word(word, choice, 14)
+    narrow = TextBox(0, (0, 0, 20, 0), text=word, font=choice, size=14)
+    wide = TextBox(0, (0, 0, 20, 0), text=word, font="Cour", size=14)
+    check("11. 3: larghezza minima: Courier e il font scelto danno larghezze diverse, la casella le rispetta",
+          abs(cour - other) > 5 and abs(fitted_rect(narrow, QRectF(0, 0, 20, 0)).width() - other) < 0.01
+          and abs(fitted_rect(wide, QRectF(0, 0, 20, 0)).width() - cour) < 0.01, f"{cour:.1f} / {other:.1f}")
+    text = "uno due tre quattro cinque sei sette otto nove dieci"
+    lines_cour, lines_other = text_box_lines(text, "Cour", 12, 120), text_box_lines(text, choice, 12, 120)
+    check("11. 3: a capo e altezza con le misure del font scelto",
+          lines_cour != lines_other and text_box_height(text, choice, 12, 120) == lines_other * 1.2 * 12,
+          f"Courier {lines_cour} righe, {choice} {lines_other}")
+    helvetica = fonts.Face(mupdf.fz_new_base14_font("Helvetica"))
+    samples = ["a b c", "Prova di testo che va a capo più volte", "parolalunghissimaeoltre e poi altro",
+               " spazi   in   mezzo  ", "riga\n\nvuota in mezzo", "€ città  x  y ", "lungo di "]
+    same = all(len(fonts.break_lines(s, helvetica, 11, wdt)) == text_box_lines(s, "Helv", 11, wdt)
+               for s in samples for wdt in (30, 60, 100))
+    check("11. 3: a capo come MuPDF (stesse righe con Helvetica)", same)
+
+    # 4. Font che non si possono incorporare, e senza contorni.
+    def patched(name, fs_type=None, glyf=False):
+        data = bytearray(Path(installed[choice]).read_bytes())
+        count = int.from_bytes(data[4:6], "big")
+        for i in range(count):
+            rec = 12 + 16 * i
+            tag, offset = bytes(data[rec:rec + 4]), int.from_bytes(data[rec + 8:rec + 12], "big")
+            if tag == b"OS/2" and fs_type is not None:
+                data[offset + 8:offset + 10] = fs_type.to_bytes(2, "big")
+            if glyf and tag in (b"glyf", b"CFF "):
+                data[rec:rec + 4] = b"xxxx"
+        folder = work / name
+        folder.mkdir()
+        path = folder / ("prova" + Path(installed[choice]).suffix)
+        path.write_bytes(data)
+        return folder, path
+
+    allowed, allowed_file = patched("font_permesso", fs_type=0)
+    restricted, restricted_file = patched("font_ristretto", fs_type=0x0002)
+    bitmap, bitmap_file = patched("font_bitmap", glyf=True)
+    info = fonts.font_info(restricted_file)
+    check("11. 4: fsType 0x0002 letto: incorporamento vietato", info is not None and not info.embeddable
+          and fonts.font_info(allowed_file).embeddable)
+    check("11. 4: il font con fsType restrittivo non è nell'elenco, lo stesso con fsType 0 sì",
+          choice not in fonts.scan([restricted]) and fonts.scan([allowed]).get(choice) == str(allowed_file))
+    check("11. 4: nemmeno un font senza contorni", not fonts.font_info(bitmap_file).outlines and not fonts.scan([bitmap]))
+
+    # 5. Font non installato alla riapertura (simulato).
+    original_list = fonts._installed
+    fonts._installed = {k: p for k, p in original_list.items() if k != choice}
+    fonts._faces.clear()
+    w._fill_font_box()
+    try:
+        open_doc(out11)
+        box = model.items[0] if model.items else None
+        check("11. 5: riaperto senza il font: la casella ha ancora il suo font", box is not None and box.font == choice
+              and box.embedded is not None)
+        click(center(box))
+        check("11. 5: il menu lo segna «non installato»",
+              w.font_box.currentData() == choice and w.font_box.currentText() == NOT_INSTALLED.format(choice),
+              w.font_box.currentText())
+        check("11. 5: l'aspetto resta quello salvato (font incorporato)", inked_on_screen(box) > 20)
+        check("11. 5: finché non si tocca il testo non cambia niente", model.pending() is None)
+        font_before = box_font(out11)
+        drag(center(box), center(box) + QPoint(0, round(40 * v._scale())))
+        check("11. 5: spostata e salvata: stesso font incorporato, riusato", save_as(out11) and not errors
+              and box_font(out11) == font_before and "Città € 11 nuovo" in page_text(out11),
+              f"{errors} {box_font(out11)} {font_before} {page_text(out11)!r}")
+        box = model.items[0]
+        double_click(center(box))
+        v.editor.selectAll()
+        write("nuovo 11 Città")
+        key(Qt.Key.Key_Escape)
+        check("11. 5: testo nuovo con i caratteri incorporati: il font resta", box.font == choice and not errors)
+        check("11. 5: salvato col font incorporato", save_as(out11) and box_font(out11) == font_before
+              and "nuovo 11 Città" in page_text(out11))
+        box = model.items[0]
+        w.statusBar().clearMessage()
+        double_click(center(box))
+        v.editor.selectAll()
+        write("Zebra")
+        key(Qt.Key.Key_Escape)
+        check("11. 5: caratteri che mancano: passa a Helvetica con un messaggio",
+              box.font == "Helv" and w.statusBar().currentMessage() == FONT_FALLBACK.format(choice),
+              f"{box.font} {w.statusBar().currentMessage()!r}")
+        check("11. 5: salvato in Helvetica, nessun errore", save_as(out11) and not errors and "Zebra" in page_text(out11)
+              and box_font(out11) is None, str(errors))
+    finally:
+        fonts._installed = original_list
+        fonts._faces.clear()
+        w._fill_font_box()
+
+    # Stampa e Organizza pagine trattano queste caselle come le altre.
+    src = copy("semplice.pdf", "font_pagine.pdf")
+    open_doc(src)
+    box = add_text(0, 100, 300, "Stampa font")
+    click(center(box))
+    choose_font(choice)
+    path, temp = print_source(str(src), None, [], {}, [], model.pending())
+    check("11. stampa: il temporaneo ha la casella col font incorporato", temp is not None
+          and "Stampa font" in page_text(path) and (box_font(path) or (0, False))[1])
+    remove_quietly(temp)
+    saved = work / "font_pagine_salvato.pdf"
+    save_as(saved)
+    w.rotate_current(90)
+    t = time.perf_counter()
+    while w._page_job is not None and time.perf_counter() - t < 60:
+        app.processEvents(); time.sleep(0.005)
+    pump(0.1)
+    box = model.items[0] if len(model.items) == 1 else None
+    check("11. pagine: ruotata, la casella resta col suo font e il font incorporato",
+          box is not None and box.font == choice and box.embedded is not None and (box_font(w._path) or (0, False))[1],
+          str(box))
+    w._set_text_style(font="Helv", size=11.0, color="#000000", align=0)
+    w.activateWindow()  # dopo il dialog dell'avanzamento
+    app.processEvents()
+    if w.modified:
+        box_answers.append(QMessageBox.StandardButton.Discard)
 
     # --- Link: in modalità Testo e con una casella selezionata non scattano ---
     src = copy("link.pdf")

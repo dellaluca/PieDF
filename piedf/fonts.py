@@ -207,9 +207,9 @@ class EmbeddedFont:
     family: str
     xref: int  # oggetto /Font (Type0) nel file
     base_font: str  # /BaseFont con il prefisso del subset: riconosce l'oggetto nel documento
-    data: bytes  # programma del font (subset: i glifi non usati sono vuoti)
-    cmap: dict[str, int]  # carattere → glifo, dalla /ToUnicode
-    chars: set[str] = field(default_factory=set)  # caratteri con il glifo: quelli delle caselle che lo usano
+    data: bytes = field(repr=False)  # programma del font (subset: i glifi non usati sono vuoti)
+    cmap: dict[str, int] = field(repr=False)  # carattere → glifo, dalla /ToUnicode
+    chars: set[str] = field(default_factory=set, repr=False)  # caratteri con il glifo: quelli delle caselle che lo usano
 
 
 class Face:
