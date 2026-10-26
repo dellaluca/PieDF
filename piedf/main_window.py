@@ -2,8 +2,8 @@ import os
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QEvent, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QIcon, QKeySequence, QPixmap
+from PySide6.QtCore import QDate, QEvent, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap
 from PySide6.QtPrintSupport import QAbstractPrintDialog, QPrintDialog, QPrinter, QPrinterInfo
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from piedf import paths
+from piedf.about_dialog import AboutDialog
 from piedf.annotations import (
     COLORS,
     DEFAULT_DRAW,
@@ -48,6 +49,7 @@ from piedf.annotations import (
     Annotations,
 )
 from piedf.document import OpenError, PasswordRequired, PdfDocument, open_document
+from piedf.external import open_external
 from piedf.forms import FormValues
 from piedf.page_ops import MAIN, PageRef
 from piedf.page_organizer import PageJob, PageOrganizer, open_with_password, run_with_progress
@@ -82,8 +84,6 @@ XFA_MESSAGE = "Questo modulo usa una tecnologia (XFA) che PieDF non supporta: i 
 MAX_HISTORY = 50
 SIDEBAR_WIDTH = 220  # px logici, larghezza del pannello laterale la prima volta
 SAVE_FIRST = "Salva o scarta le modifiche prima di organizzare le pagine."
-# Gli unici link esterni che si seguono: niente file:, launch, javascript: o altri PDF.
-SAFE_SCHEMES = ("http", "https", "mailto")
 
 
 class ThumbnailItem(QLabel):
@@ -339,6 +339,9 @@ class MainWindow(QMainWindow):
         self._build_draw_menu()
         sign_menu.addAction(self.act_draw)
         sign_menu.addMenu(self.draw_menu)
+
+        help_menu = self.menuBar().addMenu("&Aiuto")
+        help_menu.addAction("&Informazioni su PieDF…", lambda: AboutDialog(self).exec())
 
     def _build_toolbar(self) -> None:
         bar = QToolBar("Strumenti")
@@ -904,26 +907,8 @@ class MainWindow(QMainWindow):
         self._forward.clear()
 
     def _open_uri(self, uri: str) -> None:
-        url = QUrl(uri, QUrl.ParsingMode.StrictMode)
-        scheme = url.scheme().lower()
-        ok = url.isValid() and scheme in SAFE_SCHEMES and bool(url.path() if scheme == "mailto" else url.host())
-        if not ok:
+        if not open_external(uri, self):
             self.statusBar().showMessage("Link non supportato per sicurezza", 10000)
-            return
-        # L'indirizzo per intero e codificato (niente caratteri simili Unicode): è quello che si apre
-        # davvero, che può essere diverso dal testo visibile nel PDF.
-        address = bytes(url.toEncoded()).decode("ascii")
-        Button = QMessageBox.StandardButton
-        box = QMessageBox(
-            QMessageBox.Icon.Question, "Link esterno",
-            f"Aprire questo indirizzo nel browser?\n\n{address}",
-            Button.Open | Button.Cancel, self,
-        )
-        box.button(Button.Open).setText("Apri")
-        box.button(Button.Cancel).setText("Annulla")
-        box.setDefaultButton(Button.Cancel)
-        if box.exec() == Button.Open:
-            QDesktopServices.openUrl(url)
 
     def mousePressEvent(self, event) -> None:
         # Tasti laterali del mouse, anche sopra la vista (che non li usa e li lascia passare).
