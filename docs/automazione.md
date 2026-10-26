@@ -29,6 +29,8 @@ risposta a un needs-info ───┘    legge ticket e CLAUDE.md  ignora  → c
 
 Le PR non si uniscono mai da sole: le rivedi e le unisci tu.
 
+**Il Build è obbligatorio per unire** (protezione di `main`, vale anche per gli admin): GitHub non permette il merge finché il controllo `controlli` non è verde sull'ultimo commit della PR e il branch non è aggiornato con `main` (pulsante *Update branch*: il merge commit fa ripartire il Build). Così su `main` arriva solo codice provato su Windows insieme a quello già unito. I push dei worker usano il `GITHUB_TOKEN`, che non avvia workflow: l'esecutore avvia il Build sul branch della PR a fine esecuzione (passo «Avvia il build della PR»). Se una PR resta senza Build (per esempio dopo un'esecuzione annullata), avvialo a mano: `gh workflow run build.yml --ref <branch>`.
+
 Se il **Build su Windows** fallisce su una PR dei worker, il job "ritenta" commenta la PR con le righe `FAIL` e rilancia l'esecutore su quella PR, al massimo **2 volte** per PR. Dopo due tentativi si ferma: serve un'occhiata a mano. I worker lanciano tutti i controlli con `python tests/run_all.py`.
 
 Se la sessione finisce lasciando commit o modifiche non pubblicati sul runner, il workflow li pubblica lui e apre una PR in bozza "Bozza da salvataggio automatico per #N", da controllare. La trascrizione completa di ogni sessione è tra gli artifact dell'esecuzione (14 giorni): serve a capire cosa è andato storto, perché nel log l'output di Claude è nascosto.
@@ -93,6 +95,6 @@ Prima versione fatta: #4 → #5 → #8 → #13 (build dell'exe nella CI e releas
 ## Costi e limiti
 
 - **Turni per esecuzione:** Haiku 60, Sonnet 140, Opus 200 (in `claude-esecutore.yml`).
-- **Minuti di Actions:** repo privato, piano Free = 2000 minuti al mese. Il build gira su Windows, che conta doppio: circa 12 minuti per ogni push su un branch (controlli + build e prova dell'exe). L'esecutore gira su Linux.
+- **Minuti di Actions:** il repo è pubblico, quindi i minuti dei runner standard (anche Windows) sono gratuiti. Il Build dura circa 20 minuti per ogni push su un branch.
 - **Uso di Claude:** ogni ticket consuma una valutazione di Opus più un'esecuzione, sui limiti del tuo abbonamento.
 - **Scadenze:** quando `CLAUDE_CODE_OAUTH_TOKEN` scade, rigeneralo e aggiorna il secret.
