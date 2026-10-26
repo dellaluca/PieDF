@@ -1,5 +1,7 @@
 # Release: a ogni tag v* (es. v0.1.0) costruisce l'exe su Windows, lo prova
-# e pubblica una GitHub Release con lo zip portatile allegato.
+# e pubblica una GitHub Release con le note e il codice sorgente. Lo zip compilato
+# NON è pubblico (si vende a parte): finisce in una release in bozza "<tag>-zip",
+# visibile solo ai collaboratori.
 #
 # Il tag deve corrispondere a __version__ in piedf/__init__.py:
 #   1. aggiorna __version__ con una PR e uniscila;
@@ -57,10 +59,10 @@ jobs:
 
       - name: Pubblica la release
         run: |
+          note="PieDF $TAG: codice sorgente di questa versione (Source code, qui sotto). Per compilarlo da te: [docs/sviluppo.md](https://github.com/$GITHUB_REPOSITORY/blob/$TAG/docs/sviluppo.md). Funzioni e istruzioni: [README](https://github.com/$GITHUB_REPOSITORY#readme)."
+          gh release create "$TAG" --title "PieDF $TAG" --notes "$note" --generate-notes
+          # Lo zip compilato va in una release in BOZZA, che vedono solo i collaboratori del repo
+          # (gli artifact delle run di un repo pubblico li scarica chiunque): si prende da lì per
+          # la vendita. Una bozza non crea il tag "<tag>-zip" finché non viene pubblicata: non pubblicarla.
           zip=$(ls dist/PieDF-*-win64.zip)
-          # Copia con il nome fisso: il link
-          # https://github.com/<repo>/releases/latest/download/PieDF-win64.zip
-          # scarica sempre l'ultima versione (README, siti esterni).
-          cp "$zip" dist/PieDF-win64.zip
-          note="PieDF $TAG: lettore PDF portatile per Windows 10/11. Scompatta lo zip e avvia \`PieDF\PieDF.exe\`; per disinstallare cancella la cartella. Funzioni e istruzioni: [README](https://github.com/$GITHUB_REPOSITORY#readme)."
-          gh release create "$TAG" "$zip" dist/PieDF-win64.zip --title "PieDF $TAG" --notes "$note" --generate-notes
+          gh release create "$TAG-zip" "$zip" --draft --target "$GITHUB_SHA"             --title "PieDF $TAG — zip per la vendita (bozza privata, non pubblicare)"             --notes "Zip compilato e provato dal workflow Release per $TAG. Solo per i collaboratori: non pubblicare questa bozza."

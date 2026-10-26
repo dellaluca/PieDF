@@ -2,8 +2,8 @@ import os
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QEvent, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QKeySequence, QPixmap
+from PySide6.QtCore import QDate, QEvent, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QFontDatabase, QIcon, QKeySequence, QPixmap
 from PySide6.QtPrintSupport import QAbstractPrintDialog, QPrintDialog, QPrinter, QPrinterInfo
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from piedf import fonts, paths
+from piedf.about_dialog import AboutDialog
 from piedf.annotations import (
     COLORS,
     DEFAULT_DRAW,
@@ -48,6 +49,7 @@ from piedf.annotations import (
     Annotations,
 )
 from piedf.document import OpenError, PasswordRequired, PdfDocument, open_document
+from piedf.external import open_external
 from piedf.forms import FormValues
 from piedf.page_ops import MAIN, PageRef
 from piedf.page_organizer import PageJob, PageOrganizer, open_with_password, run_with_progress
@@ -87,8 +89,6 @@ XFA_MESSAGE = "Questo modulo usa una tecnologia (XFA) che PieDF non supporta: i 
 MAX_HISTORY = 50
 SIDEBAR_WIDTH = 220  # px logici, larghezza del pannello laterale la prima volta
 SAVE_FIRST = "Salva o scarta le modifiche prima di organizzare le pagine."
-# Gli unici link esterni che si seguono: niente file:, launch, javascript: o altri PDF.
-SAFE_SCHEMES = ("http", "https", "mailto")
 
 
 class ThumbnailItem(QLabel):
@@ -333,7 +333,11 @@ class MainWindow(QMainWindow):
         pages_menu.addAction(self.act_rotate_left)
         pages_menu.addAction(self.act_rotate_right)
 
-        sign_menu = self.menuBar().addMenu("F&irma")
+        sign_menu = self.menuBar().addMenu("&Strumenti")
+        self._tools_menu = sign_menu
+        self._insert_sign_menu = sign_menu.addMenu("&Inserisci firma")
+        self._insert_sign_menu.aboutToShow.connect(lambda: self._fill_sign_menu(self._insert_sign_menu))
+        sign_menu.addSeparator()
         sign_menu.addAction("Crea &firma…", lambda: self.create_signature(Kind.SIGNATURE))
         sign_menu.addAction("Crea &iniziali…", lambda: self.create_signature(Kind.INITIALS))
         sign_menu.addSeparator()
@@ -345,6 +349,9 @@ class MainWindow(QMainWindow):
         self._build_draw_menu()
         sign_menu.addAction(self.act_draw)
         sign_menu.addMenu(self.draw_menu)
+
+        help_menu = self.menuBar().addMenu("&Aiuto")
+        help_menu.addAction("&Informazioni su PieDF…", lambda: AboutDialog(self).exec())
 
     def _build_toolbar(self) -> None:
         bar = QToolBar("Strumenti")
@@ -391,7 +398,7 @@ class MainWindow(QMainWindow):
         bar.addSeparator()
 
         self._sign_menu = QMenu(self)
-        self._sign_menu.aboutToShow.connect(self._fill_sign_menu)
+        self._sign_menu.aboutToShow.connect(lambda: self._fill_sign_menu(self._sign_menu))
         self.sign_button = QToolButton()
         self.sign_button.setText("Firma ▾")
         self.sign_button.setToolTip("Metti una firma sul documento")
@@ -701,6 +708,7 @@ class MainWindow(QMainWindow):
         for item in self._doc_actions + self._doc_widgets:
             item.setEnabled(has_doc)
         self.act_save.setEnabled(has_doc and self.modified)
+        self._insert_sign_menu.menuAction().setEnabled(has_doc)
         self.act_back.setEnabled(has_doc and bool(self._back))
         self.act_forward.setEnabled(has_doc and bool(self._forward))
         # La vista si ruota solo senza firme, campi, caselle o tratti da salvare e senza strumenti
@@ -963,26 +971,8 @@ class MainWindow(QMainWindow):
         self._forward.clear()
 
     def _open_uri(self, uri: str) -> None:
-        url = QUrl(uri, QUrl.ParsingMode.StrictMode)
-        scheme = url.scheme().lower()
-        ok = url.isValid() and scheme in SAFE_SCHEMES and bool(url.path() if scheme == "mailto" else url.host())
-        if not ok:
+        if not open_external(uri, self):
             self.statusBar().showMessage("Link non supportato per sicurezza", 10000)
-            return
-        # L'indirizzo per intero e codificato (niente caratteri simili Unicode): è quello che si apre
-        # davvero, che può essere diverso dal testo visibile nel PDF.
-        address = bytes(url.toEncoded()).decode("ascii")
-        Button = QMessageBox.StandardButton
-        box = QMessageBox(
-            QMessageBox.Icon.Question, "Link esterno",
-            f"Aprire questo indirizzo nel browser?\n\n{address}",
-            Button.Open | Button.Cancel, self,
-        )
-        box.button(Button.Open).setText("Apri")
-        box.button(Button.Cancel).setText("Annulla")
-        box.setDefaultButton(Button.Cancel)
-        if box.exec() == Button.Open:
-            QDesktopServices.openUrl(url)
 
     def mousePressEvent(self, event) -> None:
         # Tasti laterali del mouse, anche sopra la vista (che non li usa e li lascia passare).
@@ -1405,7 +1395,8 @@ class MainWindow(QMainWindow):
         SignatureManager(self.signatures, self).exec()
 
     def place_signature(self, signature: Signature) -> None:
-        self._sign_menu.close()
+        for menu in (self._sign_menu, self._insert_sign_menu, self._tools_menu):
+            menu.close()
         self.view.start_placing(signature)
 
     def _create_and_place(self, kind: Kind) -> None:
@@ -1413,8 +1404,7 @@ class MainWindow(QMainWindow):
         if signature is not None and self._path is not None:
             self.place_signature(signature)
 
-    def _fill_sign_menu(self) -> None:
-        menu = self._sign_menu
+    def _fill_sign_menu(self, menu: QMenu) -> None:
         menu.clear()
         signatures = self.signatures.list(Kind.SIGNATURE)
         initials = self.signatures.list(Kind.INITIALS)
