@@ -126,6 +126,7 @@ class Renderer(QObject):
         self._process.join(2)
         if self._process.is_alive():
             self._process.terminate()
+            self._process.join(2)
 
 
 class _ResultReader(QThread):

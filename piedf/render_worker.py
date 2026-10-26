@@ -33,7 +33,11 @@ file inseriti e li disegna così come sono, annotazioni di PieDF comprese.
 """
 
 import math
+import multiprocessing
+import os
 import queue
+
+PARENT_POLL_S = 1.0  # ogni quanto un processo che aspetta controlla che la GUI ci sia ancora
 
 
 def run(requests, results) -> None:
@@ -49,10 +53,13 @@ def run(requests, results) -> None:
     while True:
         # Senza lavoro si aspetta; altrimenti si leggono solo i messaggi già arrivati,
         # così le richieste vecchie (scroll veloce, zoom) vengono scartate.
-        msg = requests.get() if not wanted else _get_nowait(requests)
+        msg = _get(requests) if not wanted else _get_nowait(requests)
         while msg is not None:
             kind = msg[0]
             if kind == "quit":
+                # Le pagine non ancora lette non servono più: senza questo il processo
+                # aspetterebbe all'uscita che la GUI le legga.
+                results.cancel_join_thread()
                 return
             if kind == "open":
                 _, gen, path, password = msg
@@ -155,7 +162,7 @@ def print_pages(path, password, items, slots, acks, results) -> None:
     acked = 0
     for n, (page, scale) in enumerate(items):
         while n - acked >= PRINT_AHEAD:
-            acks.get()
+            _get(acks)
             acked += 1
         t = time.perf_counter()
         try:
@@ -198,7 +205,7 @@ def thumbnails(requests, results) -> None:
     docs = {}
     wanted: list[tuple[int, int, float]] = []
     while True:
-        msg = requests.get() if not wanted else _get_nowait(requests)
+        msg = _get(requests) if not wanted else _get_nowait(requests)
         while msg is not None:
             if msg[0] == "quit":
                 for doc in docs.values():
@@ -255,6 +262,17 @@ def _links(doc, index: int) -> list[dict]:
 
 def _coord(v: float) -> float | None:
     return None if math.isnan(v) else v
+
+
+def _get(q):
+    """Come `q.get()`, ma se la GUI non c'è più (uccisa, in crash) il processo esce: niente orfani."""
+    parent = multiprocessing.parent_process()
+    while True:
+        try:
+            return q.get(timeout=PARENT_POLL_S)
+        except queue.Empty:
+            if parent is not None and not parent.is_alive():
+                os._exit(0)  # senza aspettare i thread delle code, che nessuno legge più
 
 
 def _get_nowait(q):

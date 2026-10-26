@@ -5,7 +5,9 @@
     python tests/check_print.py
 """
 import hashlib
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -176,9 +178,10 @@ def main():
     s = width / src_doc[0].rect.width
     ref = src_doc[0].get_pixmap(matrix=pymupdf.Matrix(s, s), alpha=False)
     src_doc.close()
-    sample = range(0, min(len(data), len(ref.samples)), 7)
-    err = sum(abs(data[i] - ref.samples[i]) for i in sample) / len(sample)
-    far = sum(1 for i in sample if abs(data[i] - ref.samples[i]) > 32) / len(sample)
+    ref_data = ref.samples  # una volta sola: ogni `samples` copia tutta l'immagine (minuti di controllo)
+    sample = range(0, min(len(data), len(ref_data)), 7)
+    err = sum(abs(data[i] - ref_data[i]) for i in sample) / len(sample)
+    far = sum(1 for i in sample if abs(data[i] - ref_data[i]) > 32) / len(sample)
     check("1. risoluzione del render, nessuna perdita visibile",
           (width, height) == (ref.width, ref.height) and err < 0.5 and far < 0.001,
           f"{width}x{height}, errore medio {err:.2f}, {far * 100:.3f}% oltre 32")
@@ -335,6 +338,9 @@ def main():
             longest[name] = max(longest.get(name, 0), e - s)
     print("INFO passo più lungo: " + ", ".join(f"{name} {sec * 1000:.0f} ms" for name, sec in
                                                sorted(longest.items(), key=lambda x: -x[1])), flush=True)
+    bands = sorted(e - s for name, s, e in steps if name == "disegno")
+    if bands:
+        print(f"INFO strisce: {len(bands)}, mediana {bands[len(bands) // 2] * 1000:.1f} ms", flush=True)
     check("6. avanzamento «Stampa pagina N di 50…»", "Stampa pagina 12 di 50…" in labels, f"{len(labels)} testi")
     if proc:
         grow = (peak[0] - base) / 2**20
@@ -401,6 +407,65 @@ def main():
     w.close(); app.processEvents()
     check("uscita durante la stampa: pulito", had_temp and tmp_files() == [] and not job._process.is_alive(),
           str(tmp_files()))
+
+    # Nessun processo figlio rimasto (#47). Il resource_tracker di multiprocessing (memoria
+    # condivisa, solo fuori da Windows) esce da solo insieme al processo principale.
+    if psutil:
+        def children():
+            alive = []
+            for p in proc.children(recursive=True):
+                try:
+                    if p.status() != psutil.STATUS_ZOMBIE and "resource_tracker" not in " ".join(p.cmdline()):
+                        alive.append(p)
+                except psutil.NoSuchProcess:
+                    pass
+            return alive
+        t = time.perf_counter()
+        while children() and time.perf_counter() - t < 10:
+            pump(0.1)
+        left = children()
+        check("nessun processo figlio rimasto", not left, str([(p.pid, p.cmdline()[-2:]) for p in left]))
+    else:
+        skip("nessun processo figlio rimasto", "psutil non installato")
+
+    # GUI uccisa (es. dal timeout dei controlli): il processo di render se ne accorge ed esce.
+    script = work / "uccisa.py"
+    script.write_text(
+        "import multiprocessing, os\n"
+        "from piedf import render_worker\n"
+        "if __name__ == '__main__':\n"
+        "    ctx = multiprocessing.get_context('spawn')\n"
+        "    requests, results = ctx.Queue(), ctx.Queue()\n"
+        "    p = ctx.Process(target=render_worker.run, args=(requests, results), daemon=True)\n"
+        "    p.start()\n"
+        "    requests.put(('open', 1, None, None))\n"
+        "    assert results.get(timeout=30) == ('closed', 1)  # partito e in attesa di richieste\n"
+        "    print(p.pid, flush=True)\n"
+        "    os._exit(0)  # come un processo ucciso: nessuna pulizia\n"
+    )
+    root = str(Path(__file__).resolve().parent.parent)
+    log = work / "uccisa.txt"
+    with open(log, "w") as f:  # un file e non una pipe: il processo di render la terrebbe aperta
+        subprocess.run([sys.executable, str(script)], stdout=f, stderr=subprocess.STDOUT, timeout=60,
+                       env=dict(os.environ, PYTHONPATH=root))
+    first = log.read_text().split("\n")[0]
+    orphan = int(first) if first.isdigit() else None
+    if orphan is None:
+        check("GUI uccisa: processo di render partito", False, log.read_text()[-300:])
+    elif psutil:
+        gone = False
+        t = time.perf_counter()
+        while not gone and time.perf_counter() - t < 15:
+            try:
+                gone = psutil.Process(orphan).status() == psutil.STATUS_ZOMBIE
+            except psutil.NoSuchProcess:
+                gone = True
+            time.sleep(0.2)
+        if not gone:
+            psutil.Process(orphan).kill()
+        check("GUI uccisa: il processo di render esce da solo", gone, f"{time.perf_counter() - t:.1f} s")
+    else:
+        skip("GUI uccisa", "psutil non installato")
 
     print(f"\n{sum(results)}/{len(results)} ok", flush=True)
     return 0 if all(results) else 1
