@@ -46,6 +46,7 @@ from piedf.annotations import (
     to_qrect,
     to_tuple,
 )
+from piedf import fonts
 from piedf.document import COMBO, LIST, TEXT, FormField, Ink, TextBox, ink_rect
 from piedf.forms import FormValues
 from piedf.ink import simplify, smooth_points
@@ -129,6 +130,7 @@ class PdfView(QAbstractScrollArea):
     copy_busy = Signal(bool)  # copia del testo che aspetta le parole di qualche pagina: inizio/fine
     copy_progress = Signal(int, int)  # pagine lette, pagine da leggere
     copy_failed = Signal()  # il processo della copia non è arrivato in fondo: appunti invariati
+    font_fallback = Signal(str)  # il testo nuovo non si può scrivere nel font (non installato): passa a Helvetica
 
     def __init__(self, renderer: Renderer, parent=None) -> None:
         super().__init__(parent)
@@ -2034,7 +2036,9 @@ class PdfView(QAbstractScrollArea):
             self._annotations.select(existing)
             self._open_box_editor(existing, new=False)
             return
-        style = self.text_style
+        style = dict(self.text_style)
+        if not fonts.available(style["font"], None, ""):
+            style["font"] = "Helv"  # il font delle ultime caselle non è più installato
         page_w, _ = self._sizes[page]
         # La data è larga quanto il suo testo (fitted_rect la allarga fino alla parola più lunga).
         width = min(MIN_BOX_WIDTH if date else NEW_BOX_WIDTH, page_w)
@@ -2081,7 +2085,7 @@ class PdfView(QAbstractScrollArea):
 
     def _place_box_editor(self) -> None:
         editor, box = self._editor, self._editing_box
-        family, hint = BOX_FONTS.get(box.font, BOX_FONTS["Helv"])
+        family, hint = BOX_FONTS.get(box.font, (box.font, QFont.StyleHint.AnyStyle))
         font = QFont(family)
         font.setStyleHint(hint)
         font.setPixelSize(max(1, round(box.size * self._scale())))
@@ -2109,8 +2113,13 @@ class PdfView(QAbstractScrollArea):
             elif empty:
                 self._annotations.remove(box)
             elif text != box.text:
-                rect = fitted_rect(box, to_qrect(box.rect), self._sizes[box.page], text=text)
-                self._annotations.update(box, "modifica testo", text=text, rect=to_tuple(rect))
+                changes = {"text": text}
+                if not fonts.available(box.font, box.embedded, text):
+                    # Font non installato qui e quello incorporato non ha tutti i caratteri.
+                    changes["font"] = "Helv"
+                    self.font_fallback.emit(box.font)
+                rect = fitted_rect(box, to_qrect(box.rect), self._sizes[box.page], **changes)
+                self._annotations.update(box, "modifica testo", rect=to_tuple(rect), **changes)
         finally:
             self._committing = False
 
