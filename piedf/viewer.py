@@ -52,6 +52,7 @@ from piedf.ink import simplify, smooth_points
 from piedf.placements import MIN_HEIGHT, Placement, Placements, clamp_rect, default_rect
 from piedf.renderer import Renderer
 from piedf.signatures import Signature
+from piedf.text_copy import CopyJob
 from piedf.text_selection import END, PageText, ordered, page_span, selected_text
 
 MARGIN = 12  # px logici intorno e tra le pagine
@@ -125,6 +126,9 @@ class PdfView(QAbstractScrollArea):
     text_box_changed = Signal(object)
     draw_tool_changed = Signal(object)  # strumento di disegno attivo (PEN, HIGHLIGHTER, ERASER) o None
     rotation_changed = Signal(int)  # rotazione della vista (solo a schermo): 0, 90, 180, 270
+    copy_busy = Signal(bool)  # copia del testo che aspetta le parole di qualche pagina: inizio/fine
+    copy_progress = Signal(int, int)  # pagine lette, pagine da leggere
+    copy_failed = Signal()  # il processo della copia non è arrivato in fondo: appunti invariati
 
     def __init__(self, renderer: Renderer, parent=None) -> None:
         super().__init__(parent)
@@ -141,6 +145,7 @@ class PdfView(QAbstractScrollArea):
 
         self._gen = 0
         self._sizes: list[tuple[float, float]] = []
+        self._source: tuple[str, str | None] | None = None  # file e password, per la copia del testo
         self._zoom = 1.0
         self._fit = FitMode.WIDTH
         self._tops: list[int] = []
@@ -208,12 +213,22 @@ class PdfView(QAbstractScrollArea):
         self.draw_style = dict(DEFAULT_DRAW)  # colori e spessore dei prossimi tratti
 
         # Selezione del testo (#15): (pagina, posizione) di partenza e di arrivo (vedi text_selection),
-        # pressione che diventa selezione trascinando, trascinamento in corso, copia che aspetta
-        # le parole di qualche pagina, ultimo doppio clic (per il triplo).
+        # pressione che diventa selezione trascinando (posizione, punto, stima), trascinamento in
+        # corso, ultimo doppio clic (per il triplo).
         self._selection: tuple[tuple[int, int], tuple[int, int]] | None = None
-        self._text_press: tuple[tuple[int, int], QPointF] | None = None
+        self._text_press: tuple[tuple[int, int], QPointF, tuple | None] | None = None
+        # Estremi della selezione decisi senza le parole della pagina, non ancora arrivate (#49):
+        # (pagina, punto in punti PDF) per l'inizio e la fine, None = posizione vera. Si correggono
+        # quando arrivano le parole; la copia le aspetta. `_caret_guess`: quella dell'ultimo `_text_caret`.
+        self._selection_guess: tuple = (None, None)
+        self._caret_guess: tuple[int, QPointF] | None = None
         self._selecting = False
-        self._copy_pending = False
+        # Copia che aspetta le parole di qualche pagina (#49): processo che le legge, parole già
+        # raccolte per le pagine della selezione, pagine che mancano ancora e quante erano.
+        self._copy: CopyJob | None = None
+        self._copy_words: dict[int, PageText] = {}
+        self._copy_missing: set[int] = set()
+        self._copy_total = 0
         self._double_click: tuple[QElapsedTimer, QPointF] | None = None
         self._autoscroll = QTimer(self)
         self._autoscroll.setInterval(AUTOSCROLL_MS)
@@ -353,29 +368,48 @@ class PdfView(QAbstractScrollArea):
             return ""
         return selected_text(selection, self._words)
 
+    @property
+    def copying(self) -> bool:
+        """Copia in corso: aspetta le parole di qualche pagina."""
+        return self._copy is not None
+
     def copy_selection(self) -> None:
-        """Copia il testo selezionato negli appunti (appena arrivano le parole che mancano)."""
+        """Copia il testo selezionato negli appunti, una volta sola e intero (#49).
+
+        Le parole delle pagine che la vista non ha ancora si leggono in un processo a parte
+        (`CopyJob`); arrivano prima dal processo di render, se le aveva già chieste. La copia
+        si annulla con `cancel_copy` (anche cambiando selezione o documento): appunti invariati.
+        """
         selection = self._ordered_selection()
-        if selection is None:
+        if selection is None or self._copy is not None:
+            return  # la copia in corso è già di questa selezione
+        pages = range(selection[0][0], selection[1][0] + 1)
+        missing = [p for p in pages if p not in self._words]
+        if not missing:
+            _set_clipboard(selected_text(selection, self._words))
             return
-        missing = [p for p in range(selection[0][0], selection[1][0] + 1) if p not in self._words]
-        if missing:
-            self._copy_pending = True
-            for page in missing:
-                self._request_words(page)
+        if self._source is None:
+            self.copy_failed.emit()
             return
-        self._copy_pending = False
-        text = selected_text(selection, self._words)
-        if text:
-            QApplication.clipboard().setText(text)
+        self._copy_words = {p: self._words[p] for p in pages if p in self._words}
+        self._copy_missing = set(missing)
+        self._copy_total = len(missing)
+        self._copy = CopyJob(*self._source, missing, self)
+        self._copy.words_ready.connect(self._on_copy_words)
+        self._copy.failed.connect(self._on_copy_failed)
+        self.copy_busy.emit(True)
+        self.copy_progress.emit(0, self._copy_total)
+
+    def cancel_copy(self) -> None:
+        """Annulla la copia in corso: gli appunti restano com'erano."""
+        if self._copy is not None:
+            self._end_copy()
 
     def select_all_text(self) -> None:
-        """Tutto il testo della pagina corrente (niente, se la pagina non ha testo)."""
+        """Tutto il testo del documento (le parole che mancano si leggono copiando)."""
         if not self._sizes:
             return
-        page = max(self._current, 0)
-        self._request_words(page)
-        self._set_selection(((page, 0), (page, END)))
+        self._set_selection(((0, 0), (len(self._sizes) - 1, END)))
 
     def clear_text_selection(self) -> None:
         self._set_selection(None)
@@ -570,11 +604,15 @@ class PdfView(QAbstractScrollArea):
                 return link
         return None
 
-    def set_document(self, gen: int, page_sizes: list[tuple[float, float]]) -> None:
+    def set_document(
+        self, gen: int, page_sizes: list[tuple[float, float]], path: str | None = None, password: str | None = None,
+    ) -> None:
+        """`path` e `password` servono solo per copiare il testo delle pagine non ancora lette."""
         self._reset_interaction()
         self._search_hits, self._search_current = {}, None
         self._gen = gen
         self._sizes = page_sizes
+        self._source = (path, password) if path is not None else None
         self._reset_rotation()
         self._clear_cache()
         self._current = -1
@@ -599,6 +637,7 @@ class PdfView(QAbstractScrollArea):
         self._search_hits, self._search_current = {}, None
         self._gen += 1
         self._sizes = []
+        self._source = None
         self._reset_rotation()
         self._clear_cache()
         self._relayout()
@@ -802,8 +841,9 @@ class PdfView(QAbstractScrollArea):
             return
         self._words_pending.discard(page)
         self._words[page] = PageText(words)
-        if self._copy_pending:
-            self.copy_selection()
+        self._resolve_carets(page, self._words[page])
+        if page in self._copy_missing:
+            self._copy_page(page, self._words[page])
         if self._selection is not None:
             self.viewport().update()  # una selezione fino a fine pagina ora si vede
         if self._cursor_pos is not None and not self._busy():
@@ -940,7 +980,9 @@ class PdfView(QAbstractScrollArea):
         selected = self._placements.selected
         box = self._annotations.selected
         focus = self._focus_field
-        if event.key() == Qt.Key.Key_Escape and self._placing is not None:
+        if event.key() == Qt.Key.Key_Escape and self._copy is not None:
+            self.cancel_copy()
+        elif event.key() == Qt.Key.Key_Escape and self._placing is not None:
             self.cancel_placing()
         elif event.key() == Qt.Key.Key_Escape and self._text_tool is not None:
             self.cancel_text_tool()
@@ -1036,9 +1078,10 @@ class PdfView(QAbstractScrollArea):
         self._space_held = False
         self._pan = None
         self._selection = None
+        self._selection_guess = (None, None)
         self._text_press = None
         self._selecting = False
-        self._copy_pending = False
+        self.cancel_copy()
         self._double_click = None
         self._autoscroll.stop()
         self.cancel_placing()
@@ -1302,7 +1345,9 @@ class PdfView(QAbstractScrollArea):
         link = self.link_at(pos) if placement is None and self._links_active() else None
         self._link_press = (link, pos) if link is not None else None
         # Anche da un link: senza trascinare si segue il link, trascinando si seleziona il testo.
-        self._text_press = (self._text_caret(pos), pos) if placement is None and self._text_active() else None
+        self._text_press = (
+            (self._text_caret(pos), pos, self._caret_guess) if placement is None and self._text_active() else None
+        )
         self._annotations.select(None)
         self._placements.select(placement)
         if placement is not None:
@@ -1485,7 +1530,9 @@ class PdfView(QAbstractScrollArea):
         return None if index is None else (page, index)
 
     def _text_caret(self, pos: QPointF) -> tuple[int, int]:
-        """Posizione nel testo più vicina al punto della vista, anche tra le pagine o fuori dalla vista."""
+        """Posizione nel testo più vicina al punto della vista, anche tra le pagine o fuori dalla vista.
+        Senza le parole della pagina è una stima (inizio o fine pagina), annotata in `_caret_guess`."""
+        self._caret_guess = None
         y = pos.y() + self.verticalScrollBar().value()
         page = max(0, min(bisect.bisect_right(self._tops, y) - 1, len(self._sizes) - 1))
         rect = self._page_rect(page)
@@ -1495,6 +1542,7 @@ class PdfView(QAbstractScrollArea):
         text = self._words.get(page)
         if text is None:
             self._request_words(page)
+            self._caret_guess = (page, pt)
             return page, 0 if y < rect.center().y() else END
         if y < rect.top():
             return page, 0
@@ -1509,14 +1557,39 @@ class PdfView(QAbstractScrollArea):
         selection = self._ordered_selection()
         return selection is not None and selection[0][0] <= page <= selection[1][0]
 
-    def _set_selection(self, selection) -> None:
+    def _set_selection(self, selection, guess: tuple = (None, None)) -> None:
+        self._selection_guess = guess if selection is not None else (None, None)
         if selection != self._selection:
             self._selection = selection
-            self._copy_pending = False
+            self.cancel_copy()
+            self.viewport().update()
+
+    def _set_caret(self, pos: QPointF) -> None:
+        """Selezione dalla pressione fino al punto della vista (trascinando)."""
+        caret = self._text_caret(pos)
+        self._set_selection((self._text_press[0], caret), (self._text_press[2], self._caret_guess))
+
+    def _resolve_carets(self, page: int, text: PageText) -> None:
+        """Arrivate le parole di `page`: gli estremi stimati senza diventano quelli veri. La
+        selezione cambia senza annullare la copia, che li aspetta."""
+
+        def caret(guess) -> tuple[int, int]:
+            pt = guess[1]
+            return page, 0 if pt.y() < 0 else text.caret_at(pt.x(), pt.y())
+
+        press = self._text_press
+        if press is not None and press[2] is not None and press[2][0] == page:
+            self._text_press = (caret(press[2]), press[1], None)
+        if self._selection is not None and page in (g[0] for g in self._selection_guess if g is not None):
+            ends, guesses = list(self._selection), list(self._selection_guess)
+            for i, guess in enumerate(guesses):
+                if guess is not None and guess[0] == page:
+                    ends[i], guesses[i] = caret(guess), None
+            self._selection, self._selection_guess = tuple(ends), tuple(guesses)
             self.viewport().update()
 
     def _drag_selection(self, pos: QPointF) -> None:
-        self._set_selection((self._text_press[0], self._text_caret(pos)))
+        self._set_caret(pos)
         # Fuori dalla vista, sopra o sotto, la vista scorre da sola.
         if pos.y() < 0 or pos.y() > self.viewport().height():
             if not self._autoscroll.isActive():
@@ -1536,7 +1609,7 @@ class PdfView(QAbstractScrollArea):
             return
         vbar = self.verticalScrollBar()
         vbar.setValue(vbar.value() + (round(dy / 2) or (1 if dy > 0 else -1)))
-        self._set_selection((self._text_press[0], self._text_caret(pos)))
+        self._set_caret(pos)
 
     def _triple_click(self, pos: QPointF) -> bool:
         """Terzo clic subito dopo un doppio clic su una parola: si seleziona la riga."""
@@ -1554,6 +1627,35 @@ class PdfView(QAbstractScrollArea):
         self._text_press = None
         self._set_selection(((page, start_index), (page, end_index)))
         return True
+
+    def _on_copy_words(self, page: int, words: list) -> None:
+        if self._copy is not None and page in self._copy_missing:
+            self._copy_page(page, PageText(words))
+
+    def _copy_page(self, page: int, text: PageText) -> None:
+        """Parole di una pagina che la copia aspettava; con l'ultima, gli appunti."""
+        self._copy_missing.discard(page)
+        self._copy_words[page] = text
+        self._resolve_carets(page, text)
+        if not self._copy_missing:
+            selection = self._ordered_selection()  # gli estremi stimati sono diventati veri
+            text = selected_text(selection, self._copy_words) if selection is not None else ""
+            self._end_copy()
+            _set_clipboard(text)
+        else:
+            # Per ultimo: l'avanzamento modale elabora gli eventi, anche le pagine dopo questa.
+            self.copy_progress.emit(self._copy_total - len(self._copy_missing), self._copy_total)
+
+    def _on_copy_failed(self, message: str) -> None:
+        self._end_copy()
+        self.copy_failed.emit()
+
+    def _end_copy(self) -> None:
+        job, self._copy = self._copy, None
+        job.close()
+        job.deleteLater()
+        self._copy_words, self._copy_missing, self._copy_total = {}, set(), 0
+        self.copy_busy.emit(False)
 
     def _paint_text_selection(self, painter: QPainter) -> None:
         selection = self._ordered_selection()
@@ -2166,6 +2268,11 @@ def _tool_cursor(tool: str) -> QCursor:
 
 def _moved(start: QPointF, pos: QPointF) -> bool:
     return (pos - start).manhattanLength() > QApplication.startDragDistance()
+
+
+def _set_clipboard(text: str) -> None:
+    if text:  # una selezione senza parole (scansione) non cambia gli appunti
+        QApplication.clipboard().setText(text)
 
 
 def _page_link(item: dict, sizes: list[tuple[float, float]]) -> PageLink:
