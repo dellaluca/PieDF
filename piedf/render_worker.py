@@ -8,6 +8,7 @@ Messaggi in ingresso:
     ("open", gen, path, password)        path None chiude il documento
     ("want", gen, [(page, scale), ...])   sostituisce la lista precedente
     ("links", gen, page)                  link della pagina, risposta subito
+    ("words", gen, page)                  parole della pagina (selezione del testo), risposta subito
     ("field", gen, page, xref, value)     valore di un campo modulo, solo nel documento in memoria
     ("search", gen, id, text, case, start)  cerca in tutte le pagine da `start` (poi da capo);
                                           sostituisce la ricerca in corso, testo vuoto = ferma
@@ -15,6 +16,7 @@ Messaggi in ingresso:
 Messaggi in uscita:
     ("page", gen, page, scale, width, height, stride, samples_rgb)
     ("links", gen, page, [{kind, rect, page, to, uri}, ...])
+    ("words", gen, page, [(x0, y0, x1, y1, parola, blocco, riga, n), ...])
     ("error", gen, message)
     ("closed", gen)                       documento chiuso: il file non è più aperto qui
     ("field", gen, page)                  campo applicato: i render precedenti della pagina sono vecchi
@@ -25,6 +27,10 @@ Link: `rect` (x0, y0, x1, y1) e `to` (x, y) sono in punti nello spazio della pag
 si vede (dopo /Rotate), come `page.rect`. `kind` è "goto" (interno: `page` e `to`, con
 None per le coordinate che la destinazione non indica) oppure "uri" (esterno: `uri`
 così com'è, anche file:, launch e link ad altri PDF; decide la GUI cosa seguire).
+
+Parole (#15): rettangoli nello stesso spazio, nell'ordine di lettura di
+`get_text("words", sort=True)` ma calcolato dopo /Rotate (MuPDF dà le parole, e le ordina,
+nella pagina non ruotata). Una pagina senza testo (scansione) ha la lista vuota.
 
 Ricerca (#14): una pagina alla volta, e solo quando non ci sono pagine da disegnare: il
 render delle pagine visibili ha sempre la precedenza. `search_for` di MuPDF ignora le
@@ -43,7 +49,11 @@ file inseriti e li disegna così come sono, annotazioni di PieDF comprese.
 """
 
 import math
+import multiprocessing
+import os
 import queue
+
+PARENT_POLL_S = 1.0  # ogni quanto un processo che aspetta controlla che la GUI ci sia ancora
 
 
 def run(requests, results) -> None:
@@ -60,7 +70,7 @@ def run(requests, results) -> None:
     while True:
         # Senza lavoro si aspetta; altrimenti si leggono solo i messaggi già arrivati,
         # così le richieste vecchie (scroll veloce, zoom) vengono scartate.
-        msg = requests.get() if not wanted and search is None else _get_nowait(requests)
+        msg = _get(requests) if not wanted and search is None else _get_nowait(requests)
         while msg is not None:
             kind = msg[0]
             if kind == "quit":
@@ -107,6 +117,13 @@ def run(requests, results) -> None:
                 except Exception as e:
                     results.put(("links", gen, page, []))
                     results.put(("error", gen, f"Link di pagina {page + 1}: {e}"))
+            elif kind == "words" and msg[1] == gen and doc is not None:
+                page = msg[2]
+                try:
+                    results.put(("words", gen, page, _words(doc[page])))
+                except Exception as e:
+                    results.put(("words", gen, page, []))
+                    results.put(("error", gen, f"Testo di pagina {page + 1}: {e}"))
             msg = _get_nowait(requests)
 
         if doc is None:
@@ -189,7 +206,7 @@ def print_pages(path, password, items, slots, acks, results) -> None:
     acked = 0
     for n, (page, scale) in enumerate(items):
         while n - acked >= PRINT_AHEAD:
-            acks.get()
+            _get(acks)
             acked += 1
         t = time.perf_counter()
         try:
@@ -232,7 +249,7 @@ def thumbnails(requests, results) -> None:
     docs = {}
     wanted: list[tuple[int, int, float]] = []
     while True:
-        msg = requests.get() if not wanted else _get_nowait(requests)
+        msg = _get(requests) if not wanted else _get_nowait(requests)
         while msg is not None:
             if msg[0] == "quit":
                 for doc in docs.values():
@@ -319,8 +336,31 @@ def _links(doc, index: int) -> list[dict]:
     return links
 
 
+def _words(page) -> list[tuple]:
+    import pymupdf
+
+    from piedf.text_selection import reading_order
+
+    words = page.get_text("words")
+    if page.rotation:
+        m = page.rotation_matrix
+        words = [(*(pymupdf.Rect(w[:4]) * m), *w[4:]) for w in words]
+    return reading_order([(float(x0), float(y0), float(x1), float(y1), *rest) for x0, y0, x1, y1, *rest in words])
+
+
 def _coord(v: float) -> float | None:
     return None if math.isnan(v) else v
+
+
+def _get(q):
+    """Come `q.get()`, ma se la GUI non c'è più (uccisa, in crash) il processo esce: niente orfani."""
+    parent = multiprocessing.parent_process()
+    while True:
+        try:
+            return q.get(timeout=PARENT_POLL_S)
+        except queue.Empty:
+            if parent is not None and not parent.is_alive():
+                os._exit(0)  # senza aspettare i thread delle code, che nessuno legge più
 
 
 def _get_nowait(q):

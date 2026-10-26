@@ -17,6 +17,7 @@ class Renderer(QObject):
 
     page_ready = Signal(int, int, float, QImage)  # gen, pagina, scala, immagine
     links_ready = Signal(int, int, list)  # gen, pagina, link (vedi render_worker)
+    words_ready = Signal(int, int, list)  # gen, pagina, parole (vedi render_worker)
     failed = Signal(int, str)  # gen, messaggio
     field_applied = Signal(int, int)  # gen, pagina: il campo è nel documento, la pagina va ridisegnata
     search_hits = Signal(int, int, int, list)  # gen, id della ricerca, pagina, rettangoli (vedi render_worker)
@@ -42,6 +43,7 @@ class Renderer(QObject):
         self._reader = _ResultReader(self._results, self._on_closed)
         self._reader.page_ready.connect(self.page_ready)
         self._reader.links_ready.connect(self.links_ready)
+        self._reader.words_ready.connect(self.words_ready)
         self._reader.failed.connect(self.failed)
         self._reader.field_applied.connect(self.field_applied)
         self._reader.search_hits.connect(self.search_hits)
@@ -128,6 +130,10 @@ class Renderer(QObject):
         if self._ensure_alive():
             self._requests.put(("links", gen, page))
 
+    def request_words(self, gen: int, page: int) -> None:
+        if self._ensure_alive():
+            self._requests.put(("words", gen, page))
+
     def search(self, gen: int, search_id: int, text: str, case: bool, start: int) -> None:
         """Cerca `text` in tutte le pagine, a partire da `start`; annulla la ricerca in corso.
         Testo vuoto = ferma la ricerca."""
@@ -143,6 +149,7 @@ class Renderer(QObject):
         self._process.join(2)
         if self._process.is_alive():
             self._process.terminate()
+            self._process.join(2)
 
 
 class _ResultReader(QThread):
@@ -150,6 +157,7 @@ class _ResultReader(QThread):
 
     page_ready = Signal(int, int, float, QImage)
     links_ready = Signal(int, int, list)
+    words_ready = Signal(int, int, list)
     failed = Signal(int, str)
     field_applied = Signal(int, int)
     search_hits = Signal(int, int, int, list)
@@ -171,6 +179,8 @@ class _ResultReader(QThread):
                 self.page_ready.emit(gen, page, scale, image)
             elif msg[0] == "links":
                 self.links_ready.emit(msg[1], msg[2], msg[3])
+            elif msg[0] == "words":
+                self.words_ready.emit(msg[1], msg[2], msg[3])
             elif msg[0] == "error":
                 self.failed.emit(msg[1], msg[2])
             elif msg[0] == "field":
