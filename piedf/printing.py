@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from multiprocessing import shared_memory
 
 import pymupdf
-from PySide6.QtCore import QObject, QPointF, QRect, QRectF, QThread, Signal
+from PySide6.QtCore import QCoreApplication, QObject, QPointF, QRect, QRectF, QThread, Signal
 from PySide6.QtGui import QImage, QPageLayout, QPainter
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (
@@ -181,6 +181,9 @@ class PrintJob(QObject):
         self._thread = _PrintThread(printer, placed, page_sizes, (area.width(), area.height()), self)
         self._thread.progress.connect(self.progress)
         self._thread.finished.connect(self._on_finished)
+        app = QCoreApplication.instance()
+        if app is not None:  # se l'applicazione esce senza closeEvent: mai un QThread vivo all'uscita
+            app.aboutToQuit.connect(self._on_quit)
 
     @property
     def total(self) -> int:
@@ -198,6 +201,11 @@ class PrintJob(QObject):
         """Aspetta la fine e pulisce subito (all'uscita il segnale `finished` non arriverebbe più)."""
         self._thread.wait()
         self._cleanup()
+
+    def _on_quit(self) -> None:
+        if self._thread.isRunning():
+            self.cancel()
+            self.wait()
 
     def _on_finished(self) -> None:
         self._cleanup()

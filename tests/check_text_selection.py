@@ -425,11 +425,104 @@ def main():
 
     w.close_document()
     check("chiudendo il documento la selezione si svuota", v._selection is None and not v._words)
+
+    # --- #54: nessun thread né processo della copia sopravvive al suo CopyJob ---
+    def start_copy(win):
+        # Parole del processo di render in ritardo: le pagine le deve leggere la copia.
+        win._renderer.request_words = lambda gen, page, r=win._renderer.request_words: QTimer.singleShot(
+            3000, lambda: r(gen, page))
+        win.open_file(str(PDFS / "lungo_350.pdf"))
+        win.activateWindow(); win.view.setFocus(); app.processEvents()
+        QTest.keyClick(win.view.viewport(), Qt.Key.Key_A, CTRL); app.processEvents()
+        QTest.keyClick(win.view.viewport(), Qt.Key.Key_C, CTRL); app.processEvents()
+        return win.view._copy
+
+    def stopped(job):
+        return job is not None and not job.process.is_alive() and not job.reader.isRunning()
+
+    if sys.platform != "win32":
+        # Su Windows il lato in scrittura della pipe resta aperto nella GUI finché il processo
+        # non parte (DupHandle): annullando subito, recv() non riceve mai l'EOF. Qui si simula.
+        import multiprocessing
+        import os
+        import piedf.text_copy as text_copy
+        spawn = multiprocessing.get_context("spawn")
+        leaked = []
+
+        class LeakyContext:
+            def __getattr__(self, name):
+                return getattr(spawn, name)
+
+            def Pipe(self, duplex=True):
+                reader, writer = spawn.Pipe(duplex)
+                leaked.append(os.dup(writer.fileno()))
+                return reader, writer
+
+        text_copy.multiprocessing = type("mp", (), {"get_context": staticmethod(lambda _: LeakyContext())})
+        job = start_copy(w)
+        started = time.perf_counter()
+        key(Qt.Key.Key_Escape)
+        elapsed = time.perf_counter() - started
+        text_copy.multiprocessing = multiprocessing
+        for fd in leaked:
+            os.close(fd)
+        check("#54 pipe ancora aperta nella GUI: annullare ferma subito il thread che legge",
+              leaked and stopped(job) and elapsed < 1.0, f"{elapsed:.2f} s")
+        w._renderer.request_words = real
+    else:
+        print("SKIP #54 simulazione della pipe aperta: su Windows succede davvero (annullamenti qui sopra)")
+
+    # Finestra chiusa a copia avviata: il processo ha già mandato qualche pagina.
+    w2 = MainWindow(); w2.resize(1000, 800); w2.show(); pump(0.2)
+    job = start_copy(w2)
+    check("#54 seconda finestra: copia in corso", job is not None and w2.view.copying)
+    wait(lambda: w2._copy_done[0] > 0 or not w2.view.copying, 30)
+    check("#54 seconda finestra: qualche pagina letta", w2.view.copying and w2._copy_done[0] > 0, str(w2._copy_done))
+    w2.close(); app.processEvents()
+    check("#54 finestra chiusa durante la copia: processo e thread fermi", stopped(job) and not w2.view.copying)
+    w2.deleteLater(); pump(0.1)
+
+    # Ctrl+A e Ctrl+C, poi la finestra si chiude subito (il processo della copia sta partendo).
+    job = start_copy(w)
+    check("#54 copia in corso alla chiusura", job is not None and v.copying)
     w.close(); app.processEvents()
+    check("#54 finestra chiusa subito dopo Ctrl+C: processo e thread fermi", stopped(job) and not v.copying)
+
+    # Uscita dall'applicazione senza closeEvent: la copia si chiude da sola (aboutToQuit).
+    w3 = MainWindow(); w3.resize(1000, 800); w3.show(); pump(0.2)
+    job = start_copy(w3)
+    check("#54 terza finestra: copia in corso", job is not None and w3.view.copying)
+    app.aboutToQuit.emit()
+    check("#54 aboutToQuit con una copia in corso: processo e thread fermi", stopped(job))
+    check("#54 aboutToQuit: processo di render fermo", not w3._renderer._process.is_alive()
+          and not w3._renderer._reader.isRunning())
+    w3.close(); app.processEvents()
+    app.quit(); app.processEvents()
 
     print(f"\n{sum(results)}/{len(results)} ok", flush=True)
     return 0 if all(results) else 1
 
 
+def repeat(times: int, args: list[str]) -> int:
+    """`--ripeti N`: lo stesso controllo N volte in sottoprocessi; conta anche il codice d'uscita (#54)."""
+    import subprocess
+    codes = []
+    for n in range(times):
+        print(f"\n=== giro {n + 1} di {times} ===", flush=True)
+        codes.append(subprocess.run([sys.executable, __file__, *args]).returncode)
+    print(f"\ncodici d'uscita: {codes}", flush=True)
+    return 0 if all(code == 0 for code in codes) else 1
+
+
 if __name__ == "__main__":
+    if "--ripeti" in sys.argv:
+        i = sys.argv.index("--ripeti")
+        sys.exit(repeat(int(sys.argv[i + 1]), sys.argv[1:i] + sys.argv[i + 2:]))
+    import faulthandler
+    faulthandler.enable()  # un crash nativo all'uscita mostra dove sono i thread
+    from PySide6.QtCore import qInstallMessageHandler
+
+    # I messaggi di Qt su stderr col tipo: un qFatal ("QThread: Destroyed while thread is
+    # still running") si vede prima che il processo termini.
+    qInstallMessageHandler(lambda kind, ctx, msg: print(f"Qt {kind.name}: {msg}", file=sys.stderr, flush=True))
     sys.exit(main())
