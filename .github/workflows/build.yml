@@ -1,7 +1,8 @@
 # Controlli su ogni branch (il risultato si vede nella PR): genera i PDF di
 # prova ed esegue tutti i tests/check_*.py su Windows, la piattaforma vera di
-# PieDF. Il job "controlli" è un controllo obbligatorio della protezione di main:
-# una PR rossa non si può unire (non rinominare il job senza aggiornare la protezione).
+# PieDF. Lo stato "Build Windows" (job "esito") è il controllo obbligatorio della
+# protezione di main: una PR rossa non si può unire (non rinominarlo senza aggiornare
+# la protezione).
 #
 # Parte a ogni push su un branch che non è main. I push dell'esecutore
 # (GITHUB_TOKEN) non fanno partire workflow: per quelli il build lo avvia
@@ -97,6 +98,29 @@ jobs:
           path: fallimenti.md
           if-no-files-found: ignore
           retention-days: 3
+
+  # Stato "Build Windows" sul commit: è il controllo obbligatorio della protezione di
+  # main. I check run delle esecuzioni avviate con workflow_dispatch (quelle che
+  # l'esecutore lancia dopo i push dei worker) non contano per la protezione, uno
+  # stato del commit sì, comunque sia partito il Build.
+  esito:
+    needs: controlli
+    if: always() && needs.controlli.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Stato del commit
+        run: |
+          if [ "${{ needs.controlli.result }}" = "success" ]; then
+            stato=success; testo="Controlli e exe ok su Windows"
+          else
+            stato=failure; testo="Controlli falliti su Windows"
+          fi
+          gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}"             -f state="$stato" -f context="Build Windows" -f description="$testo"             -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >/dev/null
 
   # Se il Build fallisce sul branch di una PR dei worker, rimanda la PR all'esecutore
   # con le righe FAIL, al massimo 2 volte per PR: si sistema da sola senza aspettare
