@@ -327,7 +327,11 @@ class MainWindow(QMainWindow):
         pages_menu.addAction(self.act_rotate_left)
         pages_menu.addAction(self.act_rotate_right)
 
-        sign_menu = self.menuBar().addMenu("F&irma")
+        sign_menu = self.menuBar().addMenu("&Strumenti")
+        self._tools_menu = sign_menu
+        self._insert_sign_menu = sign_menu.addMenu("&Inserisci firma")
+        self._insert_sign_menu.aboutToShow.connect(lambda: self._fill_sign_menu(self._insert_sign_menu))
+        sign_menu.addSeparator()
         sign_menu.addAction("Crea &firma…", lambda: self.create_signature(Kind.SIGNATURE))
         sign_menu.addAction("Crea &iniziali…", lambda: self.create_signature(Kind.INITIALS))
         sign_menu.addSeparator()
@@ -385,7 +389,7 @@ class MainWindow(QMainWindow):
         bar.addSeparator()
 
         self._sign_menu = QMenu(self)
-        self._sign_menu.aboutToShow.connect(self._fill_sign_menu)
+        self._sign_menu.aboutToShow.connect(lambda: self._fill_sign_menu(self._sign_menu))
         self.sign_button = QToolButton()
         self.sign_button.setText("Firma ▾")
         self.sign_button.setToolTip("Metti una firma sul documento")
@@ -642,6 +646,7 @@ class MainWindow(QMainWindow):
         for item in self._doc_actions + self._doc_widgets:
             item.setEnabled(has_doc)
         self.act_save.setEnabled(has_doc and self.modified)
+        self._insert_sign_menu.menuAction().setEnabled(has_doc)
         self.act_back.setEnabled(has_doc and bool(self._back))
         self.act_forward.setEnabled(has_doc and bool(self._forward))
         # La vista si ruota solo senza firme, campi, caselle o tratti da salvare e senza strumenti
@@ -1346,7 +1351,8 @@ class MainWindow(QMainWindow):
         SignatureManager(self.signatures, self).exec()
 
     def place_signature(self, signature: Signature) -> None:
-        self._sign_menu.close()
+        for menu in (self._sign_menu, self._insert_sign_menu, self._tools_menu):
+            menu.close()
         self.view.start_placing(signature)
 
     def _create_and_place(self, kind: Kind) -> None:
@@ -1354,8 +1360,7 @@ class MainWindow(QMainWindow):
         if signature is not None and self._path is not None:
             self.place_signature(signature)
 
-    def _fill_sign_menu(self) -> None:
-        menu = self._sign_menu
+    def _fill_sign_menu(self, menu: QMenu) -> None:
         menu.clear()
         signatures = self.signatures.list(Kind.SIGNATURE)
         initials = self.signatures.list(Kind.INITIALS)
