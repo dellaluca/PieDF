@@ -237,9 +237,10 @@ def thumbnails(requests, results) -> None:
             if msg[0] == "quit":
                 for doc in docs.values():
                     doc.close()
-                # Le miniature non ancora lette non servono più: senza questo il processo
-                # aspetterebbe all'uscita che la GUI le legga.
-                results.cancel_join_thread()
+                # Niente cancel_join_thread(): uscendo si finisce di spedire le miniature già
+                # in coda (la GUI le scarta in _stop_thumbs). Un messaggio interrotto a metà
+                # bloccherebbe per sempre la GUI che lo sta leggendo: la pipe non arriva mai a
+                # EOF, perché anche la GUI ne tiene aperto il lato in scrittura.
                 return
             if msg[0] == "source":
                 sources[msg[1]] = (msg[2], msg[3])
