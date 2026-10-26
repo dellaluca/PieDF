@@ -103,7 +103,7 @@ def main():
 
     # --- Menu Strumenti › Inserisci firma (#58) ---
     check("barra dei menu: Strumenti al posto di Firma",
-          menus == ["&File", "&Modifica", "&Visualizza", "&Pagine", "&Strumenti"], str(menus))
+          menus == ["&File", "&Modifica", "&Visualizza", "&Pagine", "&Strumenti", "&Aiuto"], str(menus))
     sub_menu = w._insert_sign_menu
     check("Strumenti: Inserisci firma in cima, disabilitato senza documento",
           w._tools_menu.actions()[0].menu() is sub_menu and not sub_menu.menuAction().isEnabled())
