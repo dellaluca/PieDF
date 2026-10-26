@@ -34,7 +34,11 @@ from piedf.writer import save_with_signatures
 
 MAX_DPI = 600
 NO_PRINT_MESSAGE = "L'autore di questo documento non permette la stampa."
-BAND_BYTES = 2**19  # una striscia di pagina per volta sul QPrinter (vedi _draw): ~10 ms con il GIL
+# Strisce di pagina sul QPrinter (vedi _draw): drawImage tiene il GIL per tutta la striscia.
+BAND_BYTES = 2**19  # la striscia più grande (~4 ms su un PC veloce)
+BAND_S = 0.008  # durata cercata di una striscia: sulle macchine lente le righe diminuiscono
+BAND_MIN_ROWS = 16
+YIELD_S = 0.001  # pausa dopo ogni striscia, vedi _draw
 PROCESS_EXIT_S = 5.0  # attesa massima perché il processo di stampa esca
 POLL_S = 0.2  # ogni quanto il thread di stampa controlla Annulla mentre aspetta una pagina
 
@@ -187,7 +191,7 @@ class PrintJob(QObject):
         self._thread.start()
 
     def cancel(self) -> None:
-        """Si ferma dopo la pagina in corso; la stampa iniziata viene interrotta (`abort`)."""
+        """Si ferma alla prossima striscia della pagina in corso; la stampa iniziata viene interrotta (`abort`)."""
         self._thread.cancelled = True
 
     def wait(self) -> None:
@@ -231,6 +235,7 @@ class _PrintThread(QThread):
         self.cancelled = False
         self.completed = False
         self.error = ""
+        self.band_bytes = BAND_BYTES  # dimensione delle strisce, adattata in _draw
         # [(passo, inizio, fine)] in secondi di perf_counter: per capire dai controlli quale
         # passo tiene il GIL e blocca la GUI ("render" è nel processo di stampa, senza GIL).
         self.steps: list[tuple[str, float, float]] = []
@@ -269,6 +274,8 @@ class _PrintThread(QThread):
                 self._draw(painter, image, self.page_sizes[page], rotated, scale)
                 del image  # prima di liberare lo slot: il processo ci scrive la pagina dopo
                 pixels.release()
+                if self.cancelled:  # pagina interrotta a metà: tanto la stampa si annulla
+                    break
                 self.job._acks.put(n)
                 self.progress.emit(n + 1, total)
             else:
@@ -303,12 +310,23 @@ class _PrintThread(QThread):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         # A strisce: drawImage tiene il GIL (~0,5 s per un A4 a 600 dpi) e la GUI si bloccherebbe.
         # Ogni striscia ha una riga in più, coperta dalla successiva: niente fessure bianche.
-        rows = max(1, BAND_BYTES // image.bytesPerLine())
+        # Le righe seguono la durata dell'ultima striscia (BAND_S), anche da una pagina all'altra.
+        bpl = image.bytesPerLine()
+        max_rows = max(BAND_MIN_ROWS, BAND_BYTES // bpl)
+        rows = min(max_rows, max(BAND_MIN_ROWS, self.band_bytes // bpl))
         k = h / image.height()
-        for top in range(0, image.height(), rows):
-            n = min(rows + 1, image.height() - top)
+        top = 0
+        while top < image.height() and not self.cancelled:
+            n =min(rows + 1, image.height() - top)
             t = time.perf_counter()
             painter.drawImage(QRectF(-w / 2, -h / 2 + top * k, w, n * k), image, QRect(0, top, image.width(), n))
             self._step("disegno", t)
-            time.sleep(0)  # lascia il GIL alla GUI se lo sta aspettando
+            top += rows
+            spent = self.steps[-1][2] - t
+            rows = min(max_rows, max(BAND_MIN_ROWS, rows // 2, min(rows * 2, int(rows * BAND_S / max(spent, 1e-4)))))
+            # Una pausa vera e non sleep(0): rilasciando il GIL anche solo per un attimo la GUI che lo
+            # aspetta si sveglia subito, invece di aspettare il suo intervallo (5 ms, ~16 su Windows)
+            # prima di chiederlo, e intanto la striscia dopo è già partita.
+            time.sleep(YIELD_S)
+        self.band_bytes = rows * bpl
         painter.restore()
