@@ -256,6 +256,18 @@ def main():
     w.placements.undo_stack.setClean()
     bar.close_bar()
 
+    # Una casella lontana non fa saltare la vista prima che arrivino le pagine vicine.
+    w.open_file(str(PDFS / "lungo_350.pdf")); wait_rendered()
+    w.annotations.add(TextBox(299, (100.0, 300.0, 260.0, 314.0), text="Riga 7: nella casella"))
+    start = v.current_page
+    w.act_find.trigger()
+    search("Riga 7:")
+    current = bar.hits[bar.current_index] if bar.current_index >= 0 else (-1, QRectF())
+    check("casella lontana: primo salto alla pagina corrente", start < 299 and current[0] == start == v.current_page,
+          f"da pagina {start + 1} a {current[0] + 1}, {label()}")
+    w.placements.undo_stack.setClean()
+    bar.close_bar()
+
     # --- Clic su link con la ricerca aperta ---------------------------------------------
     w.open_file(str(PDFS / "link.pdf")); wait_rendered()
     w.act_find.trigger()

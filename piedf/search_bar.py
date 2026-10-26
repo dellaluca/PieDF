@@ -228,7 +228,7 @@ class SearchBar(QFrame):
             self._current = None
         # Prima che arrivi una pagina con risultati non si sa ancora quale viene prima
         # (una casella di testo lontana non deve far saltare la vista).
-        if not self._jumped and self._text and not (self._searching and self._scanned is None):
+        if not self._jumped and self._text:
             target = self._first_after(self._scanned)
             if target is not None:
                 self._jumped = True
