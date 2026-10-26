@@ -331,10 +331,10 @@ def main():
     v.set_scroll_position(20, 0.0)
     check("pagina 21 pronta", words_ready(20))
 
-    # Le parole arrivano dal processo di render con 1 s di ritardo (#49): la copia non dipende dai tempi.
+    # Le parole arrivano dal processo di render in ritardo (#49): la copia non dipende dai tempi.
     def slow(gen, page):
         requests.append((page, page in v._visible_range()))
-        QTimer.singleShot(1000, lambda: real(gen, page))
+        QTimer.singleShot(2000, lambda: real(gen, page))
 
     w._renderer.request_words = slow
     vbar = v.verticalScrollBar()
@@ -345,10 +345,17 @@ def main():
     QTest.mouseMove(vp, a + QPoint(0, 30))
     QTest.mouseMove(vp, QPoint(a.x(), vp.height() + 60))
     pump(0.8)
-    QTest.mouseRelease(vp, L, NO, QPoint(a.x(), vp.height() + 60)); app.processEvents()
     check("trascinando sotto la vista: scorre da sola", vbar.value() > value + 100, f"{value} → {vbar.value()}")
     sel = v._ordered_selection()
     check("trascinando sotto la vista: la selezione arriva più giù", sel is not None and sel[1] > (20, 200), str(sel))
+    # Dove arriva lo scorrimento automatico dipende dai tempi (anche nel margine tra due pagine):
+    # si rilascia su «Riga 1» di pagina 22, le cui parole non sono ancora arrivate.
+    QTest.mouseMove(vp, QPoint(a.x(), vp.height() // 2)); app.processEvents()
+    v.set_scroll_position(21, 0.0); app.processEvents()
+    b = at(21, 300, 120)
+    QTest.mouseMove(vp, b); app.processEvents()
+    QTest.mouseRelease(vp, L, NO, b); app.processEvents()
+    sel = v._ordered_selection()
     value = vbar.value()
     pump(0.2)
     check("rilasciato il tasto non scorre più", vbar.value() == value)
@@ -363,8 +370,8 @@ def main():
     check("#49 la fine della selezione stimata senza parole diventa quella del mouse", end is not None and end > sel[1]
           and v._selection_guess == (None, None), f"{sel[1]} → {end}")
     check("selezione su più pagine copiata, con le pagine in ordine",
-          text.startswith("Riga 1: lorem") and f"Pagina {sel[1][0] + 1} di 350" in text and "Pagina 22 di 350" in text,
-          repr(text[:40]))
+          text.startswith("Riga 1: lorem") and "Pagina 21 di 350" not in text
+          and "\nPagina 22 di 350\nRiga 1: lorem" in text,repr(text[:40]) + " … " + repr(text[-40:]))
     check("parole chieste solo per le pagine visibili (o della selezione)",
           requests and all(vis for _, vis in requests[:5]), str(requests[:10]))
     fresh = requests[reopened:]
