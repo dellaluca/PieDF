@@ -4,7 +4,9 @@
 # protezione di main: una PR rossa non si può unire (non rinominarlo senza aggiornare
 # la protezione).
 #
-# Parte a ogni push su un branch che non è main. I push dell'esecutore
+# Parte a ogni push, anche su main: il merge non chiede che il branch sia
+# aggiornato con main, quindi il Build dopo il merge controlla le PR unite
+# insieme (avvisa e basta, non blocca niente). I push dell'esecutore
 # (GITHUB_TOKEN) non fanno partire workflow: per quelli il build lo avvia
 # l'esecutore stesso con workflow_dispatch.
 #
@@ -15,7 +17,6 @@ name: "Build"
 
 on:
   push:
-    branches-ignore: [main]
   workflow_dispatch:
 
 permissions:

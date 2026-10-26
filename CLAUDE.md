@@ -83,5 +83,5 @@ Lettore PDF desktop leggero e portatile con firma visiva stile Acrobat "Firma".
 
 Un ticket GitHub = un branch (`feat/<n>-<slug>`) = una PR verso `main`. Mai push diretti su `main`.
 I ticket li eseguono i worker su GitHub Actions (orchestratore → esecutore → PR, vedi `docs/automazione.md`). In sessione locale si scrivono ticket completi e si curano automazione e workflow, che i worker non possono modificare.
-Ogni funzione ha il suo controllo end-to-end in `tests/check_<area>.py`; il build della PR li esegue tutti su Windows ed è obbligatorio per unire: stato del commit «Build Windows» verde (protezione di `main`, anche per gli admin, branch aggiornato con `main`).
+Ogni funzione ha il suo controllo end-to-end in `tests/check_<area>.py`; il build della PR li esegue tutti su Windows ed è obbligatorio per unire: stato del commit «Build Windows» verde (protezione di `main`, anche per gli admin). Il branch non deve essere aggiornato con `main` prima del merge: scelta di Della per non rallentare il lavoro.
 Testi dell'interfaccia in italiano.
