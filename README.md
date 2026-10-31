@@ -6,7 +6,7 @@ Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa
 
 ![PieDF con un documento aperto e il pannello delle pagine](docs/img/lettura.png)
 
-> **English** — PieDF is a lightweight, portable PDF reader for Windows 10/11. It opens, searches and prints PDFs, fills in PDF forms, lets you sign documents with a drawn, typed or image signature, adds editable text boxes and freehand drawings, and reorganizes pages (reorder, rotate, insert, extract, delete). No installer: unzip and run `PieDF.exe`; to uninstall, delete the folder. Free software under the [AGPL-3.0](LICENSE). The ready-to-use build will be available as a paid download; the source code is free and you can build it yourself ([docs/sviluppo.md](docs/sviluppo.md)).
+> **English** — PieDF is a lightweight, portable PDF reader for Windows 10/11. It opens, searches and prints PDFs, fills in PDF forms, lets you sign documents with a drawn, typed or image signature, adds editable text boxes and freehand drawings, reorganizes pages (reorder, rotate, insert, extract, delete) and can seal a signed PDF with a personal digital seal so that later changes are detected. No installer: unzip and run `PieDF.exe`; to uninstall, delete the folder. Free software under the [AGPL-3.0](LICENSE). The ready-to-use build will be available as a paid download; the source code is free and you can build it yourself ([docs/sviluppo.md](docs/sviluppo.md)).
 
 ## Cosa fa
 
@@ -16,6 +16,7 @@ Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa
 - **Compilare i moduli**: caselle di testo, spunte e scelte dei moduli PDF.
 - **Scrivere e disegnare**: aggiungi caselle di testo, la data, tratti a mano libera ed evidenziazioni, modificabili anche dopo il salvataggio.
 - **Organizzare le pagine**: riordina, ruota, elimina pagine, inserisci pagine da altri PDF ed estraine una parte in un file nuovo.
+- **Salvare e bloccare**: sigilla il PDF firmato con un sigillo digitale personale, così ogni modifica fatta dopo con un altro programma viene segnalata da chi controlla le firme. Su richiesta aggiunge una data certa (marca temporale).
 - **Stampare** quello che vedi, firme comprese.
 - **Informazioni**: dal menu Aiuto vedi la versione, la licenza e il link al codice sorgente.
 
@@ -62,7 +63,12 @@ PieDF è software libero e lo resta: il codice è tutto qui, con la licenza [AGP
 
 ## Privacy
 
-PieDF non invia dati in rete. L'unico collegamento verso l'esterno è l'apertura di un link contenuto in un PDF (nel browser o nel programma di posta), solo dopo il clic e la conferma dell'indirizzo (lo stesso vale per i link della finestra Informazioni).
+PieDF non invia dati in rete. I soli collegamenti verso l'esterno sono:
+
+- l'apertura di un link contenuto in un PDF (nel browser o nel programma di posta), solo dopo il clic e la conferma dell'indirizzo (lo stesso vale per i link della finestra Informazioni);
+- la **data certa** di «Salva e blocca», solo se spunti «Aggiungi data certa»: PieDF chiede una marca temporale a un servizio pubblico e gratuito di marche temporali inviando solo un'impronta del documento, mai il documento o il tuo nome. La casella è spenta finché non la scegli tu.
+
+Il sigillo personale di «Salva e blocca» si crea sul tuo PC e la sua chiave resta nella cartella dei dati, protetta con il tuo utente di Windows.
 
 *Privacy policy*: this program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
 
