@@ -172,7 +172,51 @@ def main():
         subprocess.run(["icacls", str(ro), "/remove:d", user, "/T", "/C", "/Q"], capture_output=True)
         shutil.rmtree(ro, ignore_errors=True)
 
-    # --- 4. Onefile, solo per i numeri della PR (se è stato costruito) ---
+    # --- 4. Sigillo (#70): l'exe sigilla senza finestra, pyHanko valida il risultato ---
+    internal = EXE.parent / "_internal"
+    seal_parts = ["cryptography", "pyhanko", "pyhanko_certvalidator", "asn1crypto", "tzdata", "certifi",
+                  "uritools", "tzlocal", "_cffi_backend"]
+    seal_mb = sum(size_mb(p) for name in seal_parts for p in internal.glob(f"{name}*"))
+    # I moduli Python puri (pyHanko, asn1crypto…) stanno nell'archivio PYZ: qui solo file nativi e dati.
+    print(f"INFO sigillo: file nativi e dati nell'exe {seal_mb:.1f} MB (cryptography, cffi, certifi, tzdata)", flush=True)
+    check("sigillo: aiohttp e lxml esclusi dall'exe",
+          not list(internal.glob("aiohttp*")) and not list(internal.glob("lxml*")))
+    seal_dir = S / "sigillo_exe"
+    shutil.rmtree(seal_dir, ignore_errors=True)
+    seal_dir.mkdir(parents=True)
+    sealed = seal_dir / "sigillato.pdf"
+    t = time.perf_counter()
+    try:
+        code = subprocess.run([str(EXE), "--piedf-sigilla", str(PDFS / "modulo.pdf"), str(sealed),
+                               str(seal_dir / "sigillo"), "Prova Exe"], timeout=120).returncode
+    except subprocess.TimeoutExpired:
+        code = "timeout"
+    error = Path(str(sealed) + ".errore.txt")
+    check("sigillo: l'exe sigilla un PDF", code == 0 and sealed.exists(),
+          f"codice {code}, {time.perf_counter() - t:.1f} s " + (error.read_text(encoding="utf-8") if error.exists() else ""))
+    check("sigillo: nessun processo PieDF rimasto", wait_for(lambda: not pids(), EXIT_TIMEOUT), str(pids()))
+    if sealed.exists():
+        try:
+            from asn1crypto import pem, x509
+            from pyhanko.pdf_utils.reader import PdfFileReader
+            from pyhanko.sign.fields import MDPPerm
+            from pyhanko.sign.validation import validate_pdf_signature
+            from pyhanko.sign.validation.status import SignatureCoverageLevel
+            from pyhanko_certvalidator import ValidationContext
+            cert = x509.Certificate.load(pem.unarmor((seal_dir / "sigillo" / "certificato.pem").read_bytes())[2])
+            with open(sealed, "rb") as f:
+                sig = PdfFileReader(io.BytesIO(f.read())).embedded_signatures[0]
+            status = validate_pdf_signature(sig, ValidationContext(trust_roots=[cert]))
+            check("sigillo: pyHanko lo valida (integro, certificazione, nessuna modifica, file intero)",
+                  status.intact and status.valid and status.trusted and sig.docmdp_level == MDPPerm.NO_CHANGES
+                  and status.coverage == SignatureCoverageLevel.ENTIRE_FILE, status.summary())
+        except Exception as e:
+            check("sigillo: pyHanko lo valida", False, repr(e))
+        blob = (seal_dir / "sigillo" / "chiave.dpapi").read_bytes()
+        check("sigillo: chiave cifrata con DPAPI (nessuna chiave in chiaro)", b"PRIVATE KEY" not in blob and len(blob) > 100)
+    shutil.rmtree(seal_dir, ignore_errors=True)
+
+    # --- 5. Onefile, solo per i numeri della PR (se è stato costruito) ---
     if ONEFILE.exists():
         print(f"INFO onefile: {size_mb(ONEFILE):.1f} MB", flush=True)
         proc, win, secs = run(ONEFILE, pdf)

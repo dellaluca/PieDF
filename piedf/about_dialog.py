@@ -8,6 +8,7 @@ import PySide6
 from PySide6.QtCore import QSize, Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from pyhanko.version import __version__ as pyhanko_version  # solo la versione: pyHanko non si carica
 
 from piedf import REPO_URL, __version__
 from piedf.external import open_external
@@ -33,6 +34,7 @@ def components() -> list[tuple[str, str]]:
     return [
         (f"PyMuPDF {pymupdf.VersionBind} / MuPDF {pymupdf.VersionFitz}", "AGPL-3.0, Artifex"),
         (f"Qt for Python (PySide6) {PySide6.__version__}", "LGPL-3.0"),
+        (f"pyHanko {pyhanko_version}", "MIT"),
         (f"Python {platform.python_version()}", "PSF License"),
     ]
 

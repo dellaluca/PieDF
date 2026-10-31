@@ -51,12 +51,14 @@ from piedf.annotations import (
 from piedf.document import OpenError, PasswordRequired, PdfDocument, open_document
 from piedf.external import open_external
 from piedf.forms import FormValues
+from piedf.locking import LockDialog, SealJob, ask_seal_name
 from piedf.page_ops import MAIN, PageRef
 from piedf.page_organizer import PageJob, PageOrganizer, open_with_password, run_with_progress
 from piedf.placements import Placements
 from piedf.positions import Positions
-from piedf.printing import NO_PRINT_MESSAGE, PrintJob, PrintOptions, PrintOptionsDialog, can_print, print_source, selected_pages
+from piedf.printing import NO_PRINT_MESSAGE, PrintJob, PrintOptions, PrintOptionsDialog, can_print, print_source, remove_quietly, selected_pages
 from piedf.renderer import Renderer
+from piedf.sealing import ALREADY_SIGNED, FOREIGN, TIMESTAMP_FAILED, TSA_URL, default_name, has_signatures, identity_state, seal_dir
 from piedf.search_bar import SearchBar
 from piedf.sidebar import PAGES_TAB, TOC_TAB, Sidebar
 from piedf.signature_dialog import SignatureDialog
@@ -126,6 +128,7 @@ class MainWindow(QMainWindow):
         self._original: str | None = None
         self._temps: list[str] = []  # temporanei delle pagine, da cancellare quando non servono più
         self._page_job: PageJob | None = None
+        self._seal_job: SealJob | None = None
         self._gen = 0
         # Cronologia dei link interni: posizioni (pagina, y in punti) come scroll_position.
         self._back: list[tuple[int, float]] = []
@@ -203,6 +206,7 @@ class MainWindow(QMainWindow):
         self.act_open = self._action("&Apri…", self._choose_file, [QKeySequence.StandardKey.Open])
         self.act_save = self._action("&Salva", self.save, [QKeySequence.StandardKey.Save])
         self.act_save_as = self._action("Salva &con nome…", self.save_as, ["Ctrl+Shift+S"])
+        self.act_lock = self._action("Salva e &blocca…", self.save_and_lock)
         self.act_print = self._action("S&tampa…", self.print_document, [QKeySequence.StandardKey.Print])
         self.act_close = self._action("&Chiudi", self.close_document, ["Ctrl+W"])
         # StandardKey.Quit non ha una scorciatoia su Windows.
@@ -268,7 +272,7 @@ class MainWindow(QMainWindow):
         self.act_select_all = self._action("Seleziona &tutto", self.select_all_text, [QKeySequence.StandardKey.SelectAll])
 
         self._doc_actions = [
-            self.act_save_as, self.act_print, self.act_close, self.act_zoom_in, self.act_zoom_out, self.act_actual,
+            self.act_save_as, self.act_lock, self.act_print, self.act_close, self.act_zoom_in, self.act_zoom_out, self.act_actual,
             self.act_fit_page, self.act_fit_width, self.act_prev, self.act_next, self.act_goto,
             self.act_text, self.act_date, self.act_organize, self.act_rotate_left, self.act_rotate_right,
             self.act_find, self.act_find_next, self.act_find_prev,
@@ -284,6 +288,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.act_save)
         file_menu.addAction(self.act_save_as)
+        file_menu.addAction(self.act_lock)
         file_menu.addSeparator()
         file_menu.addAction(self.act_print)
         file_menu.addSeparator()
@@ -991,6 +996,14 @@ class MainWindow(QMainWindow):
 
         # Le firme ora fanno parte del PDF: non sono più modificabili né annullabili (i campi sì);
         # le caselle di testo tornano nel modello dal file riaperto, modificabili.
+        if not self._reopen_saved(dest, password):
+            return False
+        self._save_path = dest
+        self.statusBar().showMessage(f"Salvato in {Path(dest).name}", 10000)
+        return True
+
+    def _reopen_saved(self, dest: str, password: str | None) -> bool:
+        """Apre il file appena scritto alla stessa pagina, zoom e scorrimento."""
         page, zoom, fit = self.view.current_page, self.view.zoom, self.view.fit_mode
         scroll_x, scroll_y = self.view.horizontalScrollBar().value(), self.view.verticalScrollBar().value()
         self.placements.clear()
@@ -1004,8 +1017,133 @@ class MainWindow(QMainWindow):
         self.view.go_to_page(page)
         self.view.horizontalScrollBar().setValue(scroll_x)
         self.view.verticalScrollBar().setValue(scroll_y)
-        self._save_path = dest
-        self.statusBar().showMessage(f"Salvato in {Path(dest).name}", 10000)
+        return True
+
+    # --- Salva e blocca (#70) ---------------------------------------------------------
+
+    def _ask(self, title: str, text: str, yes: str) -> bool:
+        Button = QMessageBox.StandardButton
+        box = QMessageBox(QMessageBox.Icon.Question, title, text, Button.Ok | Button.Cancel, self)
+        box.button(Button.Ok).setText(yes)
+        box.button(Button.Cancel).setText("Annulla")
+        box.setDefaultButton(Button.Cancel)
+        return box.exec() == Button.Ok
+
+    def save_and_lock(self) -> bool:
+        """Conferma, nome del sigillo al primo uso, file di destinazione; poi il sigillo in un
+        processo a parte (`_lock_to`). False se non si parte (annullato o rifiutato)."""
+        if self._path is None or self._seal_job is not None:
+            return False
+        self.view.commit_editor()
+        self.view.cancel_copy()  # il processo della copia tiene aperto il file
+        try:
+            signed = has_signatures(self._path, self._password)
+        except Exception as e:
+            QMessageBox.critical(self, "Blocco non riuscito", f"Impossibile rileggere il documento.\n\nDettagli: {e}")
+            return False
+        if signed:
+            QMessageBox.warning(self, "Salva e blocca", ALREADY_SIGNED)
+            return False
+
+        dialog = LockDialog(self._settings.value("lock/timestamp", False, type=bool), self)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        timestamp = dialog.timestamp()
+        dialog.deleteLater()
+        if not accepted:
+            return False
+        self._settings.setValue("lock/timestamp", timestamp)
+
+        folder = seal_dir(paths.data_dir())
+        state = identity_state(folder)
+        if state == "foreign" and not self._ask("Sigillo personale", FOREIGN, "Crea nuovo"):
+            return False
+        name = None
+        if state != "ok":
+            name = ask_seal_name(self, default_name())
+            if name is None:
+                return False
+
+        src = Path(self._shown_path())
+        proposed = str(src.with_name(f"{src.stem}_bloccato.pdf"))
+        # Il dialog chiede già la conferma se il file esiste.
+        dest, _ = QFileDialog.getSaveFileName(self, "Salva e blocca PDF", proposed, "Documenti PDF (*.pdf)")
+        if not dest:
+            return False
+        if not Path(dest).suffix:
+            dest += ".pdf"
+        return self._lock_to(os.path.abspath(dest), TSA_URL if timestamp else None, name)
+
+    def _lock_to(self, dest: str, tsa_url: str | None, name: str | None) -> bool:
+        """Scrive le modifiche in un temporaneo (come la stampa) e lo fa sigillare in `dest`
+        da `SealJob`; alla fine riapre `dest` come dopo Salva."""
+        self.view.cancel_placing()
+        password = self._password
+        try:
+            source, temp = print_source(
+                self._path, password, self.placements.items, self.placements.missing_pngs(),
+                self.forms.changed(), self.annotations.pending(), prefix="piedf-blocco-",
+            )
+        except SaveError as e:
+            QMessageBox.critical(self, "Blocco non riuscito", str(e))
+            return False
+        src = self._path
+        overwrite = os.path.normcase(dest) == os.path.normcase(src)
+        # Il processo di render tiene aperto il file: va rilasciato prima di sovrascriverlo.
+        if overwrite and not self._renderer.close(self._gen, wait=True):
+            self._renderer.open(self._gen, src, password)
+            if temp:
+                remove_quietly(temp)
+            QMessageBox.critical(self, "Blocco non riuscito", "Il documento è ancora in uso, riprova.")
+            return False
+
+        job = SealJob(source, password, dest, seal_dir(paths.data_dir()), tsa_url, name, self)
+        self._seal_job = job
+        gen = self._gen
+        progress = QProgressDialog("Blocco del PDF…", "Annulla", 0, 0, self)
+        progress.setWindowTitle("Salva e blocca")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setMinimumDuration(0)  # subito modale: niente modifiche al documento mentre si sigilla
+        progress.canceled.connect(job.cancel)
+        QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+        self.statusBar().showMessage("Blocco del PDF…")
+
+        def on_finished(result: str, message: str) -> None:
+            progress.canceled.disconnect(job.cancel)
+            progress.close()
+            progress.deleteLater()
+            job.deleteLater()
+            self._seal_job = None
+            QApplication.restoreOverrideCursor()
+            self.statusBar().clearMessage()
+            if temp:
+                remove_quietly(temp)
+            if result == "done" and gen == self._gen:
+                if self._reopen_saved(dest, password):
+                    self._save_path = None  # Salva su un file bloccato romperebbe il sigillo: si richiede il nome
+                    self.statusBar().showMessage(f"Salvato e bloccato in {Path(dest).name}", 10000)
+                return
+            if overwrite and gen == self._gen:
+                self._renderer.open(self._gen, src, password)
+                self.view.reload()
+            if result == "timestamp":
+                if self._ask("Marca temporale", message, "Blocca senza"):
+                    self._lock_to(dest, None, None)
+            elif result == "foreign":
+                if self._ask("Sigillo personale", message, "Crea nuovo"):
+                    new_name = ask_seal_name(self, default_name())
+                    if new_name is not None:
+                        self._lock_to(dest, tsa_url, new_name)
+            elif result == "signed":
+                QMessageBox.warning(self, "Salva e blocca", message)
+            elif result:
+                QMessageBox.critical(self, "Blocco non riuscito", message)
+            else:
+                self.statusBar().showMessage("Blocco annullato", 10000)
+
+        job.finished.connect(on_finished)
+        job.start()
         return True
 
     # --- Stampa -----------------------------------------------------------------------
@@ -1424,6 +1562,8 @@ class MainWindow(QMainWindow):
             self._print_job.wait()
         if self._page_job is not None:
             self._page_job.cancel()
+        if self._seal_job is not None:
+            self._seal_job.cancel()
         self.view.cancel_copy()
         self._settings.sync()  # all'uscita Python può non distruggere QSettings
         self._renderer.shutdown()

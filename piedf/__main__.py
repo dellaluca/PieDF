@@ -9,6 +9,11 @@ if __name__ == "__main__":
     # prima che si importino Qt e la finestra.
     multiprocessing.freeze_support()
 
+    if sys.argv[1:2] == ["--piedf-sigilla"]:  # solo per tests/check_exe.py, senza finestra
+        from piedf.sealing import cli
+
+        sys.exit(cli(sys.argv[2:]))
+
     from piedf.app import main
 
     sys.exit(main(sys.argv))

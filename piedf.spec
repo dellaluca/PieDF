@@ -27,6 +27,10 @@ EXCLUDES = [
     "tkinter", "unittest", "pydoc", "numpy", "PIL",
     # Analisi del layout di PyMuPDF (opzionale, con onnxruntime): PieDF non la usa.
     "pymupdf.layout", "onnxruntime", "yaml", "pandas", "matplotlib", "fontTools",
+    # pyHanko (#70): client HTTP asincrono (al suo posto un modulo vuoto, vedi sealing._stub_aiohttp:
+    # la marca temporale usa urllib), XML/XAdES e il vecchio backend crittografico non servono al sigillo.
+    "aiohttp", "aiohappyeyeballs", "aiosignal", "frozenlist", "multidict", "yarl", "propcache",
+    "lxml", "oscrypto", "requests",
 ]
 
 # Librerie Qt che gli hook di PyInstaller tirano dentro comunque (tramite i plugin).
@@ -55,10 +59,20 @@ def keep(dest: str) -> bool:
     return True
 
 
+DATAS = [(str(ROOT / "piedf" / "assets"), "piedf/assets"), (str(ROOT / "LICENSE"), ".")]
+HIDDEN = []
+if sys.platform == "win32":
+    # pyHanko firma con l'ora locale (tzlocal → zoneinfo): su Windows i fusi orari vengono dal
+    # pacchetto tzdata, che zoneinfo carica per nome (l'analisi di PyInstaller non lo vede).
+    from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+    DATAS += collect_data_files("tzdata")
+    HIDDEN += collect_submodules("tzdata")
+
 a = Analysis(
     [str(ROOT / "piedf" / "__main__.py")],
     pathex=[str(ROOT)],
-    datas=[(str(ROOT / "piedf" / "assets"), "piedf/assets"), (str(ROOT / "LICENSE"), ".")],
+    datas=DATAS,
+    hiddenimports=HIDDEN,
     excludes=EXCLUDES,
     noarchive=False,
     optimize=0,
