@@ -27,6 +27,10 @@ EXCLUDES = [
     "tkinter", "unittest", "pydoc", "numpy", "PIL",
     # Analisi del layout di PyMuPDF (opzionale, con onnxruntime): PieDF non la usa.
     "pymupdf.layout", "onnxruntime", "yaml", "pandas", "matplotlib", "fontTools",
+    # pyHanko (#70): client HTTP asincrono (al suo posto un modulo vuoto, vedi sealing._stub_aiohttp:
+    # la marca temporale usa urllib), XML/XAdES e il vecchio backend crittografico non servono al sigillo.
+    "aiohttp", "aiohappyeyeballs", "aiosignal", "frozenlist", "multidict", "yarl", "propcache",
+    "lxml", "oscrypto", "requests",
 ]
 
 # Librerie Qt che gli hook di PyInstaller tirano dentro comunque (tramite i plugin).
