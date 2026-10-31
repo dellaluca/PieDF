@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 
 import pymupdf
 
+from piedf import fonts
+from piedf.fonts import EmbeddedFont
 from piedf.ink import bounds as ink_bounds
 
 A4 =(595.0, 842.0)
@@ -86,10 +88,12 @@ class TextBox(Annotation):
 
     subtype = "FreeText"
     text: str = ""
-    font: str = "Helv"  # uno di FONTS
+    font: str = "Helv"  # uno di FONTS, oppure la famiglia di un font installato (#59)
     size: float = 11.0
     color: str = "#000000"
     align: int = 0  # 0 sinistra, 1 centro, 2 destra
+    # Font già incorporato nel file (riletto alla riapertura): si riusa se ha tutti i caratteri.
+    embedded: EmbeddedFont | None = None
 
 
 @dataclass(eq=False)
@@ -348,6 +352,7 @@ def piedf_annots(page) -> list:
 def _read_annotations(doc) -> list[Annotation]:
     """Annotazioni di PieDF di tutte le pagine; quelle di altri programmi restano nel render."""
     items = []
+    embedded: dict[int, tuple[str, set[int], list[TextBox]]] = {}  # xref del font → famiglia, glifi, caselle
     for index in range(doc.page_count):
         try:
             # Senza /Annots la pagina non si carica nemmeno: veloce anche con centinaia di pagine.
@@ -362,10 +367,33 @@ def _read_annotations(doc) -> list[Annotation]:
                 if annot.type[0] == pymupdf.PDF_ANNOT_INK:
                     items.append(_read_ink(page, index, annot))
                 else:
-                    items.append(_read_text_box(doc, page, index, annot))
+                    box = _read_text_box(doc, page, index, annot)
+                    items.append(box)
+                    if box.font not in FONTS:
+                        _note_font(doc, annot, box, embedded)
             except Exception:
                 pass
+    # Un font incorporato può servire più caselle: si legge una volta, con i glifi di tutte.
+    for xref, (family, used, boxes) in embedded.items():
+        font = fonts.read_embedded(doc, xref, family, used)
+        for box in boxes:
+            box.embedded = font
     return items
+
+
+def _note_font(doc, annot, box: TextBox, embedded: dict) -> None:
+    """Annota il font incorporato nell'aspetto della casella e i glifi che usa."""
+    kind, ap = doc.xref_get_key(annot.xref, "AP/N")
+    if kind != "xref":
+        return
+    ap = int(ap.split()[0])
+    kind, ref = doc.xref_get_key(ap, f"Resources/Font/{fonts.RESOURCE}")
+    if kind != "xref":
+        return
+    family, used, boxes = embedded.setdefault(int(ref.split()[0]), (box.font, set(), []))
+    if family == box.font:
+        used |= fonts.used_glyphs(doc.xref_stream(ap) or b"")
+        boxes.append(box)
 
 
 def _read_ink(page, index: int, annot) -> Ink:
@@ -398,6 +426,10 @@ def _read_text_box(doc, page, index: int, annot) -> TextBox:
     font_match = re.search(r"/(\w+)\s+([\d.]+)\s+Tf", da)
     font = font_match.group(1) if font_match and font_match.group(1) in FONTS else FONTS[0]
     size = float(font_match.group(2)) if font_match else 11.0
+    kind, ds = doc.xref_get_key(annot.xref, "DS")
+    family = fonts.style_family(ds) if kind == "string" else None
+    if family and font_match and font_match.group(1) == fonts.RESOURCE:
+        font = family  # font da file, incorporato nell'aspetto (#59)
     q = doc.xref_get_key(annot.xref, "Q")
     rect = annot.rect * page.rotation_matrix
     return TextBox(
@@ -434,14 +466,20 @@ def _rgb(color: str) -> tuple[float, float, float]:
     return tuple(int(color[i:i + 2], 16) / 255 for i in (1, 3, 5))
 
 
-def add_text_box(page, box: TextBox):
-    """Scrive la casella come FreeText di PieDF sulla pagina (rettangolo come si vede, testo dritto)."""
+def add_text_box(page, box: TextBox, font_xref: int = 0):
+    """Scrive la casella come FreeText di PieDF sulla pagina (rettangolo come si vede, testo dritto).
+
+    Con un font da file (#59) l'aspetto lo riscrive PieDF col font incorporato: `font_xref` è
+    il /Font già nel documento (da `embed_fonts`); 0 = si incorpora qui il font intero, che va
+    bene solo per l'immagine della vista.
+    """
     x0, y0, x1, y1 = box.rect
+    face = fonts.resolve(box.font, box.embedded, box.text)
     annot = page.add_freetext_annot(
         pymupdf.Rect(x0, y0, x1, y1) * page.derotation_matrix,  # come le firme in writer.py
         box.text,
         fontsize=box.size,
-        fontname=box.font,
+        fontname=box.font if box.font in FONTS else FONTS[0],
         text_color=_rgb(box.color),
         align=box.align,
         rotate=page.rotation,  # testo dritto sulle pagine ruotate
@@ -450,7 +488,57 @@ def add_text_box(page, box: TextBox):
     annot.set_flags(pymupdf.PDF_ANNOT_IS_PRINT)
     # PyMuPDF scrive una linea di richiamo (/CL) anche senza `callout`: qualche lettore la disegna.
     page.parent.xref_set_key(annot.xref, "CL", "null")
+    if face is not None:
+        _write_font_appearance(page, annot, box, face, font_xref or fonts.full_font(page.parent, face))
     return annot
+
+
+def _write_font_appearance(page, annot, box: TextBox, face, font_xref: int) -> None:
+    """Sostituisce il testo dell'aspetto generato da MuPDF (Helvetica) con quello nel font scelto.
+
+    Del suo aspetto restano BBox, Matrix, ritaglio e rotazione; cambiano solo il blocco BT…ET
+    e le risorse. /DA nomina la risorsa del font, /DS la famiglia per la riapertura.
+    """
+    doc = page.parent
+    from pymupdf import mupdf
+
+    # Prima l'aspetto delle modifiche in sospeso (titolo, flag): dopo, MuPDF non deve
+    # rigenerarlo da /DA, dove il font non lo conosce.
+    mupdf.pdf_update_annot(annot.this)
+    ap = int(doc.xref_get_key(annot.xref, "AP/N")[1].split()[0])
+    stream = doc.xref_stream(ap).decode("latin-1")
+    start, end = stream.find("BT"), stream.rfind("ET")
+    x0, y0, x1, y1 = box.rect
+    block = fonts.appearance_text(face, box.text, box.size, x1 - x0, y1 - y0, _rgb(box.color), box.align)
+    doc.update_stream(ap, (stream[:start] + block + stream[end + 2:]).encode("latin-1"))
+    doc.xref_set_key(ap, "Resources", f"<</Font<</{fonts.RESOURCE} {font_xref} 0 R>>>>")
+    r, g, b = _rgb(box.color)
+    doc.xref_set_key(annot.xref, "DA", pymupdf.get_pdf_str(f"{r:g} {g:g} {b:g} rg /{fonts.RESOURCE} {box.size:g} Tf"))
+    doc.xref_set_key(annot.xref, "DS", pymupdf.get_pdf_str(fonts.style_string(box.font, box.size, box.color)))
+
+
+def embed_fonts(doc, boxes) -> dict[int, int]:
+    """Font da incorporare per le caselle da scrivere nel file: id(casella) → xref del /Font.
+
+    Una casella riusa il font già incorporato se ha tutti i caratteri; le altre di una stessa
+    famiglia condividono un solo subset con i caratteri di tutte.
+    """
+    result, texts = {}, {}
+    for box in boxes:
+        if box.font in FONTS:
+            continue
+        face = fonts.resolve(box.font, box.embedded, box.text)
+        if face is None:
+            continue
+        if face.embedded is not None and fonts.reusable(doc, face.embedded):
+            result[id(box)] = face.embedded.xref
+        else:
+            texts.setdefault(face, []).append(box)
+    for face, group in texts.items():
+        xref = fonts.subset_font(doc, face, "".join(sorted(set("".join(b.text for b in group)))))
+        for box in group:
+            result[id(box)] = xref
+    return result
 
 
 def add_ink(page, ink: Ink):
@@ -474,8 +562,12 @@ def add_ink(page, ink: Ink):
     return annot
 
 
-def text_box_lines(text: str, font: str, size: float, width: float) -> int:
+def text_box_lines(text: str, font: str, size: float, width: float, embedded: EmbeddedFont | None = None) -> int:
     """Righe del testo a capo automatico nella larghezza data, contate come le impagina MuPDF."""
+    face = fonts.resolve(font, embedded, text)
+    if face is not None:
+        return max(1, len(fonts.break_lines(text, face, size, max(width, 1.0))))
+    font = font if font in FONTS else FONTS[0]
     doc = pymupdf.open()
     try:
         page = doc.new_page(width=max(width, 1.0), height=14400)
@@ -488,12 +580,16 @@ def text_box_lines(text: str, font: str, size: float, width: float) -> int:
         doc.close()
 
 
-def longest_word(text: str, font: str, size: float) -> float:
+def longest_word(text: str, font: str, size: float, embedded: EmbeddedFont | None = None) -> float:
     """Larghezza in punti della parola più lunga (+1 di margine): sotto, MuPDF la taglierebbe."""
     words = text.split()
+    face = fonts.resolve(font, embedded, text)
+    if face is not None:
+        return max((face.width(w, size) for w in words), default=0.0) + 1.0
+    font = font if font in FONTS else FONTS[0]
     return max((pymupdf.get_text_length(w, fontname=font, fontsize=size) for w in words), default=0.0) + 1.0
 
 
-def text_box_height(text: str, font: str, size: float, width: float) -> float:
+def text_box_height(text: str, font: str, size: float, width: float, embedded: EmbeddedFont | None = None) -> float:
     """Altezza in punti che contiene tutto il testo: l'altezza della casella segue il testo."""
-    return text_box_lines(text, font, size, width) * LINE_HEIGHT * size
+    return text_box_lines(text, font, size, width, embedded) * LINE_HEIGHT * size
