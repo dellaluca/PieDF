@@ -59,10 +59,20 @@ def keep(dest: str) -> bool:
     return True
 
 
+DATAS = [(str(ROOT / "piedf" / "assets"), "piedf/assets"), (str(ROOT / "LICENSE"), ".")]
+HIDDEN = []
+if sys.platform == "win32":
+    # pyHanko firma con l'ora locale (tzlocal → zoneinfo): su Windows i fusi orari vengono dal
+    # pacchetto tzdata, che zoneinfo carica per nome (l'analisi di PyInstaller non lo vede).
+    from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+    DATAS += collect_data_files("tzdata")
+    HIDDEN += collect_submodules("tzdata")
+
 a = Analysis(
     [str(ROOT / "piedf" / "__main__.py")],
     pathex=[str(ROOT)],
-    datas=[(str(ROOT / "piedf" / "assets"), "piedf/assets"), (str(ROOT / "LICENSE"), ".")],
+    datas=DATAS,
+    hiddenimports=HIDDEN,
     excludes=EXCLUDES,
     noarchive=False,
     optimize=0,
