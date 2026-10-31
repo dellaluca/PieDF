@@ -6,18 +6,24 @@ PieDF (`document.add_text_box`): testo impaginato come MuPDF (`break_lines`), fo
 incorporato in subset (`subset_font`), nome della famiglia in /DS per riconoscerlo alla
 riapertura. `richtext` di MuPDF non va bene: ignora i font da file (e il colore).
 
-Elenco dei font: i file .ttf/.otf delle cartelle dei font, letti una volta sola con `struct`
-(tabelle name, OS/2, head; cache in memoria). Restano fuori i font che non permettono di essere
-incorporati (OS/2 fsType 0x0002 o 0x0200), quelli senza contorni (bitmap, emoji a colori)
-e le raccolte .ttc.
+Elenco dei font: i file .ttf/.otf delle cartelle dei font, letti con `struct` (tabelle name,
+OS/2, head). Restano fuori i font che non permettono di essere incorporati (OS/2 fsType 0x0002
+o 0x0200), quelli senza contorni (bitmap, emoji a colori) e le raccolte .ttc. Mai all'avvio:
+l'elenco si chiede quando serve (`request`) e lo legge un processo "spawn" (`_scan_process`),
+perché leggere centinaia di file in Python tiene il GIL e fermava la GUI. Cache su disco in
+`<dati>/fonts.json` (percorso → mtime_ns, size, informazioni): dal secondo avvio si rileggono
+solo i file nuovi o cambiati.
 """
 
+import json
+import multiprocessing
 import os
 import re
 import struct
 import sys
 import threading
-from dataclasses import dataclass, field
+import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import pymupdf
@@ -29,6 +35,10 @@ RESTRICTED = 0x0002  # fsType: incorporamento vietato (restricted license embedd
 BITMAP_ONLY = 0x0200  # fsType: si possono incorporare solo le bitmap
 RESOURCE = "PieDF"  # nome del font nelle risorse dell'aspetto e in /DA
 FACE_CACHE = 16  # font aperti tenuti in memoria
+CACHE_FILE = "fonts.json"
+CACHE_VERSION = 1
+POLL_S = 0.05  # attesa dell'elenco quando serve subito
+PARENT_POLL_S = 1.0  # ogni quanto il processo che legge i font controlla che la GUI ci sia ancora
 
 
 @dataclass(frozen=True)
@@ -129,32 +139,50 @@ def font_dirs() -> list[Path]:
     return [Path("/usr/share/fonts"), Path("/usr/local/share/fonts"), home / ".local/share/fonts", home / ".fonts"]
 
 
-_info_cache: dict[str, tuple[tuple[int, int], FontInfo | None]] = {}  # percorso → ((mtime, size), info)
+Cache = dict[str, tuple[int, int, "FontInfo | None"]]  # percorso → (mtime_ns, size, informazioni)
+
 _installed: dict[str, str] | None = None
+_job = None  # (processo, lato in lettura della pipe) mentre il processo legge i font
 _lock = threading.Lock()
-_preload: threading.Thread | None = None
 
 
-def scan(dirs) -> dict[str, str]:
+def scan(dirs, cache: Cache | None = None, check=None) -> dict[str, str]:
     """Famiglia → file del suo stile normale, solo per i font che si possono incorporare.
 
     Di ogni famiglia vince il file meno corsivo, meno grassetto e col peso più vicino a 400;
-    se quel file non si può incorporare, la famiglia resta fuori.
+    se quel file non si può incorporare, la famiglia resta fuori. Con `cache` si rileggono solo
+    i file nuovi o cambiati, e alla fine la cache contiene solo i file trovati. `check` si
+    chiama a ogni file (il processo lo usa per uscire se la GUI non c'è più).
     """
+    old = cache or {}
+    seen: Cache = {}
     best: dict[str, tuple[tuple, str, FontInfo]] = {}
     for folder in dirs:
         for root, _, files in os.walk(folder):
             for name in sorted(files):
                 if not name.lower().endswith(EXTENSIONS):
                     continue
+                if check is not None:
+                    check()
                 path = os.path.join(root, name)
-                info = _cached_info(path)
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                entry = old.get(path)
+                if entry is None or entry[:2] != (st.st_mtime_ns, st.st_size):
+                    entry = (st.st_mtime_ns, st.st_size, font_info(path))
+                seen[path] = entry
+                info = entry[2]
                 if info is None:
                     continue
                 for family, style in info.families:
                     score = (info.italic, info.bold, abs(info.weight - 400), not _regular_name(style))
                     if family not in best or score < best[family][0]:
                         best[family] = (score, path, info)
+    if cache is not None:
+        cache.clear()
+        cache.update(seen)
     return {family: path for family, (_, path, info) in best.items() if info.embeddable and info.outlines}
 
 
@@ -162,39 +190,166 @@ def _regular_name(style: str) -> bool:
     return style.casefold() in ("regular", "normal", "book", "roman", "standard", "")
 
 
-def _cached_info(path: str) -> FontInfo | None:
+def load_cache(file) -> Cache:
+    """Cache dei font da `fonts.json`; illeggibile o di un'altra versione = vuota."""
     try:
-        st = os.stat(path)
+        data = json.loads(Path(file).read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("versione") != CACHE_VERSION:
+            return {}
+        cache: Cache = {}
+        for path, (mtime, size, info) in data["font"].items():
+            if info is not None:
+                info = FontInfo(
+                    families=tuple((str(f), str(s)) for f, s in info["families"]),
+                    italic=bool(info["italic"]), bold=bool(info["bold"]), weight=int(info["weight"]),
+                    embeddable=bool(info["embeddable"]), outlines=bool(info["outlines"]),
+                )
+            cache[str(path)] = (int(mtime), int(size), info)
+        return cache
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return {}
+
+
+def save_cache(file, cache: Cache) -> None:
+    """Scrittura atomica: un file a metà non c'è mai (al massimo resta il temporaneo)."""
+    file = Path(file)
+    data = {"versione": CACHE_VERSION,
+            "font": {p: [m, s, asdict(i) if i is not None else None] for p, (m, s, i) in cache.items()}}
+    tmp = file.with_name(f"{file.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, file)
     except OSError:
-        return None
-    key = (st.st_mtime_ns, st.st_size)
-    cached = _info_cache.get(path)
-    if cached is None or cached[0] != key:
-        cached = (key, font_info(path))
-        _info_cache[path] = cached
-    return cached[1]
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
-def installed() -> dict[str, str]:
-    """Font installati (famiglia → file), letti la prima volta che servono (o da `preload`)."""
-    global _installed
-    with _lock:
-        if _installed is None:
-            _installed = scan(font_dirs())
-        return _installed
+def scan_cached(dirs, cache_file, check=None) -> dict[str, str]:
+    """`scan` con la cache su disco, riscritta solo se qualcosa è cambiato."""
+    cache = load_cache(cache_file)
+    before = dict(cache)
+    result = scan(dirs, cache, check)
+    if cache != before:
+        save_cache(cache_file, cache)
+    return result
+
+
+def _scan_process(dirs, cache_file, conn) -> None:
+    """Processo che legge i font: manda famiglia → file sulla pipe ed esce. Niente Qt.
+
+    Se la GUI non c'è più (uccisa, in crash) esce senza finire: niente processi orfani.
+    """
+    parent = multiprocessing.parent_process()
+    last = [time.monotonic()]
+
+    def check():
+        now = time.monotonic()
+        if now - last[0] > PARENT_POLL_S:
+            last[0] = now
+            if parent is not None and not parent.is_alive():
+                os._exit(0)
+
+    try:
+        result = scan_cached(dirs, cache_file, check)
+    except Exception:
+        result = {}
+    try:
+        conn.send(result)
+    except OSError:
+        pass
+    conn.close()
+
+
+def _cache_file() -> Path:
+    from piedf import paths  # importa Qt: solo nella GUI, mai nel processo che legge i font
+
+    return paths.data_dir() / CACHE_FILE
+
+
+def request() -> None:
+    """L'elenco serve: lo legge un processo "spawn", senza fermare la GUI (`ready` dice quando c'è).
+
+    Non fa niente se l'elenco c'è già o lo si sta leggendo.
+    """
+    global _job
+    if _installed is not None or _job is not None:
+        return
+    if multiprocessing.parent_process() is not None:
+        return  # in un processo figlio `installed` legge da sé
+    ctx = multiprocessing.get_context("spawn")
+    reader, writer = ctx.Pipe(duplex=False)
+    process = ctx.Process(target=_scan_process, args=([str(d) for d in font_dirs()], str(_cache_file()), writer),
+                          name="piedf-fonts", daemon=True)
+    process.start()
+    writer.close()  # scrive solo il processo
+    _job = (process, reader)
+
+
+def _collect(wait: bool) -> None:
+    """Prende l'elenco dal processo, se è arrivato (o aspettandolo). Processo morto = solo gli standard."""
+    global _installed, _job
+    if _installed is not None or _job is None:
+        return
+    process, conn = _job
+    while True:
+        try:
+            if conn.poll(POLL_S if wait else 0):
+                result = conn.recv()
+                break
+            # Morto senza rispondere. Non basta l'EOF: su Windows il lato in scrittura passa
+            # al figlio solo quando parte (#54).
+            if process.exitcode is not None and not conn.poll(0):
+                result = None
+                break
+        except (EOFError, OSError):
+            result = None
+            break
+        if not wait:
+            return
+    _installed = result if isinstance(result, dict) else {}
+    _job = None
+    conn.close()
+    process.join(1)
 
 
 def ready() -> bool:
     """L'elenco dei font è già pronto: `installed()` non blocca."""
+    _collect(False)
     return _installed is not None
 
 
-def preload() -> None:
-    """Legge i font in un thread, così l'elenco è pronto quando serve senza fermare la GUI."""
-    global _preload
-    if _preload is None and _installed is None:
-        _preload = threading.Thread(target=installed, name="piedf-fonts", daemon=True)
-        _preload.start()
+def loading() -> bool:
+    """Il processo sta leggendo i font (dopo `request`)."""
+    _collect(False)
+    return _job is not None
+
+
+def installed() -> dict[str, str]:
+    """Font installati (famiglia → file). Se l'elenco non c'è ancora lo chiede e lo aspetta."""
+    global _installed
+    with _lock:
+        if _installed is None:
+            if multiprocessing.parent_process() is not None:
+                _installed = scan(font_dirs())  # in un processo figlio: niente Qt, quindi niente data_dir
+            else:
+                request()
+                _collect(True)
+        return _installed
+
+
+def shutdown() -> None:
+    """Chiude il processo che legge i font, se c'è ancora (uscita)."""
+    global _job
+    if _job is None:
+        return
+    process, conn = _job
+    _job = None
+    if process.is_alive():
+        process.terminate()
+    process.join(5)
+    conn.close()
 
 
 # --- Font da usare per impaginare e scrivere ----------------------------------------------

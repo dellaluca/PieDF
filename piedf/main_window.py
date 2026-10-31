@@ -48,7 +48,7 @@ from piedf.annotations import (
     TOOL_LABELS,
     Annotations,
 )
-from piedf.document import OpenError, PasswordRequired, PdfDocument, open_document
+from piedf.document import OpenError, PasswordRequired, PdfDocument, TextBox, open_document
 from piedf.external import open_external
 from piedf.forms import FormValues
 from piedf.page_ops import MAIN, PageRef
@@ -68,7 +68,8 @@ from piedf.writer import SaveError, has_digital_signatures, save_with_signatures
 MAX_RECENT = 10
 MAX_RECENT_FONTS = 5
 MISSING_FONT_ROLE = Qt.ItemDataRole.UserRole + 1  # voce del font di una casella che qui non è installato
-FONTS_RETRY_MS = 200  # l'elenco dei font si legge in un thread: finché non è pronto ci sono solo i tre standard
+FONTS_RETRY_MS = 200  # l'elenco dei font lo legge un processo: finché non è pronto ci sono solo i tre standard
+FONTS_LOADING = "Caricamento dei font…"
 POSITION_SAVE_MS = 30_000
 FIT_NAMES = {FitMode.WIDTH: "width", FitMode.PAGE: "page", FitMode.NONE: None}
 FIT_LABELS = {FitMode.WIDTH: "Adatta larghezza", FitMode.PAGE: "Adatta pagina"}
@@ -518,7 +519,15 @@ class MainWindow(QMainWindow):
         self.font_box.setMinimumContentsLength(16)
         self.font_box.setMaxVisibleItems(20)
         self.font_box.activated.connect(lambda _: self._choose_font(self.font_box.currentData()))
-        fonts.preload()
+        # L'elenco dei font installati si chiede solo quando serve (`_request_fonts`): mai all'avvio.
+        self._font_box_full = False
+        self._fonts_timer = QTimer(self)
+        self._fonts_timer.setSingleShot(True)
+        self._fonts_timer.setInterval(FONTS_RETRY_MS)
+        self._fonts_timer.timeout.connect(self._fill_font_box)
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(fonts.shutdown)
         self._fill_font_box()
         bar.addWidget(self.font_box)
         self.size_box = QSpinBox()
@@ -565,10 +574,12 @@ class MainWindow(QMainWindow):
 
     def _fill_font_box(self) -> None:
         """Ultimi usati, poi Helvetica/Times/Courier, poi i font installati in ordine alfabetico,
-        ognuno scritto nel suo font. Finché l'elenco non è pronto (thread di `fonts.preload`)
-        ci sono solo i tre standard e si riprova poco dopo."""
+        ognuno scritto nel suo font. Finché l'elenco non è pronto (processo di `fonts.request`)
+        ci sono solo i tre standard con «Caricamento dei font…» e si riprova poco dopo."""
         combo = self.font_box
         ready = fonts.ready()
+        loading = not ready and fonts.loading()
+        self._font_box_full = ready
         families = []
         if ready:
             known = set(QFontDatabase.families())  # solo quelli che anche l'editor sa mostrare
@@ -587,11 +598,22 @@ class MainWindow(QMainWindow):
                 font.setPointSizeF(size)
                 combo.addItem(FONT_LABELS.get(family, family), family)
                 combo.setItemData(combo.count() - 1, font, Qt.ItemDataRole.FontRole)
+        if loading:
+            combo.insertSeparator(combo.count())
+            combo.addItem(FONTS_LOADING)
+            combo.model().item(combo.count() - 1).setEnabled(False)
         combo.blockSignals(False)
-        if not ready:
-            QTimer.singleShot(FONTS_RETRY_MS, self._fill_font_box)
-        elif self.text_bar.isVisible():
+        if loading:
+            self._fonts_timer.start()
+        elif ready and self.text_bar.isVisible():
             self._update_text_bar(self.view.active_text_box)
+
+    def _request_fonts(self) -> None:
+        """L'elenco dei font installati serve: lo legge un processo a parte, la tendina si
+        riempie quando arriva (Testo/Data, casella selezionata, documento con font non standard)."""
+        fonts.request()
+        if not self._font_box_full:
+            self._fill_font_box()
 
     def _recent_fonts(self) -> list[str]:
         return [f for f in self._settings.value("text/recent_fonts", [], type=list) if f][:MAX_RECENT_FONTS]
@@ -613,6 +635,7 @@ class MainWindow(QMainWindow):
         if box is None:
             self.text_bar.hide()
             return
+        self._request_fonts()
         for widget in (self.font_box, self.size_box, self.color_box):
             widget.blockSignals(True)
         combo = self.font_box
@@ -799,6 +822,8 @@ class MainWindow(QMainWindow):
         self.sidebar.set_current(self.view.current_page)
         self.forms.set_fields(doc.fields)
         self.annotations.set_items(doc.annotations)
+        if any(isinstance(a, TextBox) and a.font not in fonts.STANDARD for a in doc.annotations):
+            self._request_fonts()
         self._update_form_bar(doc)
         self.search_bar.reset(self._gen)
         self._page_box.setRange(1, len(doc.page_sizes))
@@ -1436,6 +1461,7 @@ class MainWindow(QMainWindow):
     def _on_text_tool_changed(self, active: bool) -> None:
         self._update_enabled()
         if active:
+            self._request_fonts()
             self.statusBar().showMessage(DATE_HINT if self.view.date_tool else TEXT_HINT)
         elif self.statusBar().currentMessage() in (TEXT_HINT, DATE_HINT):
             self.statusBar().clearMessage()
