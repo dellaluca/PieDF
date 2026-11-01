@@ -17,6 +17,7 @@ Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa
 - **Scrivere e disegnare**: aggiungi caselle di testo, la data, tratti a mano libera ed evidenziazioni, modificabili anche dopo il salvataggio.
 - **Organizzare le pagine**: riordina, ruota, elimina pagine, inserisci pagine da altri PDF ed estraine una parte in un file nuovo.
 - **Salvare e bloccare**: sigilla il PDF firmato con un sigillo digitale personale, così ogni modifica fatta dopo con un altro programma viene segnalata da chi controlla le firme. Su richiesta aggiunge una data certa (marca temporale).
+- **PDF bloccati**: aprendo un PDF bloccato (anche da altri programmi) una barra dice chi l'ha bloccato e quando, e avvisa in rosso se è stato modificato dopo. Il documento si può leggere, cercare, copiare e stampare, ma non modificare; «Salva con nome» ne salva una copia identica, con il sigillo intatto.
 - **Stampare** quello che vedi, firme comprese.
 - **Informazioni**: dal menu Aiuto vedi la versione, la licenza e il link al codice sorgente.
 
