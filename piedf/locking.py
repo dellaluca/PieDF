@@ -6,7 +6,9 @@ import os
 import queue
 
 from PySide6.QtCore import QObject, QTimer, Signal
-from PySide6.QtWidgets import QCheckBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QVBoxLayout
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout,
+)
 
 from piedf import sealing
 
@@ -25,9 +27,10 @@ NAME_TEXT = (
 
 
 class LockDialog(QDialog):
-    """Conferma di «Salva e blocca» con la scelta della marca temporale."""
+    """Conferma di «Salva e blocca» con la scelta della marca temporale e, con più certificati
+    (#75), la tendina «Firma con: …» (`choices` = (testo, impronta), parte da `selected`)."""
 
-    def __init__(self, timestamp: bool, parent=None) -> None:
+    def __init__(self, timestamp: bool, parent=None, choices=(), selected: str | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Salva e blocca")
         text = QLabel(CONFIRM_TEXT)
@@ -43,11 +46,26 @@ class LockDialog(QDialog):
         layout.addWidget(text)
         layout.addSpacing(6)
         layout.addWidget(self.timestamp_box)
+        self.cert_box = QComboBox()
+        for label, fp in choices:
+            self.cert_box.addItem(label, fp)
+        if selected is not None and self.cert_box.findData(selected) >= 0:
+            self.cert_box.setCurrentIndex(self.cert_box.findData(selected))
+        if len(choices) > 1:
+            form = QFormLayout()
+            form.addRow("Firma con:", self.cert_box)
+            layout.addLayout(form)
+        else:
+            self.cert_box.hide()
         layout.addWidget(buttons)
         self.setMinimumWidth(440)
 
     def timestamp(self) -> bool:
         return self.timestamp_box.isChecked()
+
+    def certificate(self) -> str | None:
+        """Impronta del certificato scelto; None se non c'era niente da scegliere."""
+        return self.cert_box.currentData() if self.cert_box.count() else None
 
 
 class SealNameDialog(QDialog):
@@ -97,13 +115,13 @@ class SealJob(QObject):
     finished = Signal(str, str)
 
     def __init__(self, src: str, password: str | None, dest: str, folder, tsa_url: str | None,
-                 name: str | None, parent=None) -> None:
+                 name: str | None, cert_id: str | None = None, parent=None) -> None:
         super().__init__(parent)
         self.dest = dest
         ctx = multiprocessing.get_context("spawn")
         self._results = ctx.Queue()
         self._process = ctx.Process(
-            target=sealing.run, args=(src, password, dest, str(folder), tsa_url, name, self._results), daemon=True,
+            target=sealing.run, args=(src, password, dest, str(folder), tsa_url, name, cert_id, self._results), daemon=True,
         )
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_MS)

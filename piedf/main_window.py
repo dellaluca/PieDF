@@ -30,8 +30,9 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
-from piedf import data_import, paths
+from piedf import certificates, data_import, paths
 from piedf.about_dialog import AboutDialog
+from piedf.certificates_dialog import DEFAULT_KEY, CertificatesDialog, ask_foreign, import_certificate
 from piedf.annotations import (
     COLORS,
     DEFAULT_DRAW,
@@ -58,7 +59,7 @@ from piedf.placements import Placements
 from piedf.positions import Positions
 from piedf.printing import NO_PRINT_MESSAGE, PrintJob, PrintOptions, PrintOptionsDialog, can_print, print_source, remove_quietly, selected_pages
 from piedf.renderer import Renderer
-from piedf.sealing import ALREADY_SIGNED, FOREIGN, TIMESTAMP_FAILED, TSA_URL, default_name, has_signatures, identity_state, seal_dir
+from piedf.sealing import ALREADY_SIGNED, TIMESTAMP_FAILED, TSA_URL, default_name, has_signatures, identity_state, seal_dir
 from piedf.search_bar import SearchBar
 from piedf.sidebar import PAGES_TAB, TOC_TAB, Sidebar
 from piedf.signature_dialog import SignatureDialog
@@ -341,6 +342,7 @@ class MainWindow(QMainWindow):
         sign_menu.addAction("Crea &iniziali…", lambda: self.create_signature(Kind.INITIALS))
         sign_menu.addSeparator()
         sign_menu.addAction("&Gestisci firme…", self.manage_signatures)
+        sign_menu.addAction("&Certificati…", self.manage_certificates)
         sign_menu.addSeparator()
         sign_menu.addAction(self.act_text)
         sign_menu.addAction(self.act_date)
@@ -1045,23 +1047,45 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Salva e blocca", ALREADY_SIGNED)
             return False
 
-        dialog = LockDialog(self._settings.value("lock/timestamp", False, type=bool), self)
+        # Con certificati importati (#75) si sceglie con quale firmare; cryptography si carica
+        # solo in quel caso, per leggerne i nomi.
+        folder = seal_dir(paths.data_dir())
+        cert_id = certificates.resolve(folder, self._settings.value(DEFAULT_KEY, "", type=str))
+        choices = []
+        if certificates.imported_fingerprints(folder):
+            choices = [(info.label, info.fingerprint) for info in certificates.entries(folder)]
+        dialog = LockDialog(self._settings.value("lock/timestamp", False, type=bool), self, choices, cert_id)
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         timestamp = dialog.timestamp()
+        cert_id = dialog.certificate() or cert_id
         dialog.deleteLater()
         if not accepted:
             return False
         self._settings.setValue("lock/timestamp", timestamp)
 
-        folder = seal_dir(paths.data_dir())
-        state = identity_state(folder)
-        if state == "foreign" and not self._ask("Sigillo personale", FOREIGN, "Crea nuovo"):
-            return False
         name = None
-        if state != "ok":
-            name = ask_seal_name(self, default_name())
-            if name is None:
+        if cert_id is not None and cert_id != certificates.personal_fingerprint(folder):
+            if certificates.key_state(folder, cert_id) == "foreign":
+                info = next((i for i in certificates.entries(folder) if i.fingerprint == cert_id), None)
+                QMessageBox.warning(self, "Salva e blocca", certificates.IMPORTED_FOREIGN.format(
+                    name=info.name if info else ""))
                 return False
+        else:
+            cert_id = None  # il sigillo personale (anche da creare)
+            state = identity_state(folder)
+            if state == "foreign":
+                answer = ask_foreign(self)
+                if answer == "import":
+                    import_certificate(self, folder, self._settings)
+                    state = identity_state(folder)
+                    if state != "ok":
+                        return False
+                elif answer != "new":
+                    return False
+            if state != "ok":
+                name = ask_seal_name(self, default_name())
+                if name is None:
+                    return False
 
         src = Path(self._shown_path())
         proposed = str(src.with_name(f"{src.stem}_bloccato.pdf"))
@@ -1071,11 +1095,12 @@ class MainWindow(QMainWindow):
             return False
         if not Path(dest).suffix:
             dest += ".pdf"
-        return self._lock_to(os.path.abspath(dest), TSA_URL if timestamp else None, name)
+        return self._lock_to(os.path.abspath(dest), TSA_URL if timestamp else None, name, cert_id)
 
-    def _lock_to(self, dest: str, tsa_url: str | None, name: str | None) -> bool:
+    def _lock_to(self, dest: str, tsa_url: str | None, name: str | None, cert_id: str | None = None) -> bool:
         """Scrive le modifiche in un temporaneo (come la stampa) e lo fa sigillare in `dest`
-        da `SealJob`; alla fine riapre `dest` come dopo Salva."""
+        da `SealJob` con il certificato `cert_id` (None = sigillo personale); alla fine riapre
+        `dest` come dopo Salva."""
         self.view.cancel_placing()
         password = self._password
         try:
@@ -1096,7 +1121,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Blocco non riuscito", "Il documento è ancora in uso, riprova.")
             return False
 
-        job = SealJob(source, password, dest, seal_dir(paths.data_dir()), tsa_url, name, self)
+        job = SealJob(source, password, dest, seal_dir(paths.data_dir()), tsa_url, name, cert_id, self)
         self._seal_job = job
         gen = self._gen
         progress = QProgressDialog("Blocco del PDF…", "Annulla", 0, 0, self)
@@ -1129,12 +1154,18 @@ class MainWindow(QMainWindow):
                 self.view.reload()
             if result == "timestamp":
                 if self._ask("Marca temporale", message, "Blocca senza"):
-                    self._lock_to(dest, None, None)
+                    self._lock_to(dest, None, None, cert_id)
             elif result == "foreign":
-                if self._ask("Sigillo personale", message, "Crea nuovo"):
+                answer = ask_foreign(self)
+                if answer == "new":
                     new_name = ask_seal_name(self, default_name())
                     if new_name is not None:
                         self._lock_to(dest, tsa_url, new_name)
+                elif answer == "import":
+                    folder = seal_dir(paths.data_dir())
+                    import_certificate(self, folder, self._settings)
+                    if identity_state(folder) == "ok":
+                        self._lock_to(dest, tsa_url, None)
             elif result == "signed":
                 QMessageBox.warning(self, "Salva e blocca", message)
             elif result:
@@ -1517,6 +1548,11 @@ class MainWindow(QMainWindow):
 
     def manage_signatures(self) -> None:
         SignatureManager(self.signatures, self).exec()
+
+    def manage_certificates(self) -> None:
+        dialog = CertificatesDialog(seal_dir(paths.data_dir()), self._settings, self)
+        dialog.exec()
+        dialog.deleteLater()
 
     def place_signature(self, signature: Signature) -> None:
         for menu in (self._sign_menu, self._insert_sign_menu, self._tools_menu):
