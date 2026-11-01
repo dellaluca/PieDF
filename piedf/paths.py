@@ -5,17 +5,28 @@ from pathlib import Path
 from PySide6.QtCore import QSettings
 
 
+def is_frozen() -> bool:
+    return getattr(sys, "frozen", False)
+
+
+def base_dir() -> Path:
+    """Cartella dell'exe (da sorgente, la radice del repo). I controlli la sostituiscono."""
+    if is_frozen():
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent.parent
+
+
+def appdata_dir() -> Path:
+    return Path(os.environ.get("APPDATA", Path.home())) / "PieDF"
+
+
 def data_dir() -> Path:
     """Cartella dei dati utente: `data/` accanto all'exe (modalità portatile), altrimenti %APPDATA%\\PieDF."""
-    if getattr(sys, "frozen", False):
-        base = Path(sys.executable).parent
-    else:
-        base = Path(__file__).resolve().parent.parent
-    portable = base / "data"
+    portable = base_dir() / "data"
     if _writable(portable):
         return portable
 
-    fallback = Path(os.environ.get("APPDATA", Path.home())) / "PieDF"
+    fallback = appdata_dir()
     fallback.mkdir(parents=True, exist_ok=True)
     return fallback
 

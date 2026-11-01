@@ -1,8 +1,11 @@
+from pathlib import Path
+
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -12,6 +15,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from piedf import data_import
 from piedf.signature_dialog import SignatureDialog
 from piedf.signatures import Kind, Signature, SignatureStore
 
@@ -34,6 +38,23 @@ def thumbnail_pixmap(image: QImage, size: QSize = THUMB) -> QPixmap:
 
 def thumbnail(image: QImage) -> QIcon:
     return QIcon(thumbnail_pixmap(image))
+
+
+def choose_data_folder(parent) -> Path | None:
+    """Fa scegliere una cartella di PieDF (con `PieDF.exe`, la sua `data\\` o `data\\firme\\`) e
+    restituisce la sua `data`. Una cartella non valida avvisa e riapre la scelta; Annulla = None."""
+    start = ""
+    while True:
+        folder = QFileDialog.getExistingDirectory(parent, "Scegli la cartella di PieDF", start)
+        if not folder:
+            return None
+        source = data_import.resolve_source(Path(folder))
+        if source is not None:
+            return source
+        QMessageBox.warning(parent, "Cartella non valida",
+                            "Qui non ci sono firme né impostazioni di PieDF. Scegli la cartella che "
+                            "contiene PieDF.exe, oppure la sua cartella «data».")
+        start = folder
 
 
 class SignatureManager(QDialog):
@@ -74,6 +95,9 @@ class SignatureManager(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).setText("Chiudi")
         buttons.addButton(self.delete_button, QDialogButtonBox.ButtonRole.ActionRole)
+        self.import_button = QPushButton("Importa firme…")
+        self.import_button.clicked.connect(self.import_signatures)
+        buttons.addButton(self.import_button, QDialogButtonBox.ButtonRole.ActionRole)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
@@ -118,6 +142,20 @@ class SignatureManager(QDialog):
             self.refresh()
             return dialog.saved
         return None
+
+    def import_signatures(self) -> None:
+        source = choose_data_folder(self)
+        if source is None:
+            return
+        try:
+            imported, present = data_import.import_signatures(source, self._store.directory.parent)
+        except OSError as e:
+            QMessageBox.warning(self, "Importa firme", f"Impossibile importare le firme: {e}")
+            return
+        self.refresh()
+        first = f"Importate {imported} firme" if imported != 1 else "Importata 1 firma"
+        second = "1 era già presente" if present == 1 else f"{present} erano già presenti"
+        QMessageBox.information(self, "Importa firme", f"{first}, {second}.")
 
     def delete_selected(self) -> None:
         signature = self.selected()

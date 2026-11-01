@@ -25,6 +25,8 @@ python tests/run_all.py pages forms    # solo check_pages.py e check_forms.py
 
 Ogni PR li esegue su Windows nel workflow "Build".
 
+`check_lock.py` («Salva e blocca», #70) non usa mai il servizio di marca temporale vero: avvia un servizio finto su `127.0.0.1` con le TSA di prova di pyHanko. Fuori da Windows `piedf/sealing.py` non ha DPAPI e protegge la chiave del sigillo con una chiave locale (stesso comportamento, nessuna protezione vera): serve solo per sviluppo e controlli.
+
 ## Costruire l'exe
 
 Ogni PR costruisce e prova l'exe nel controllo "Build" (senza allegare lo zip). A mano:
@@ -33,8 +35,10 @@ Ogni PR costruisce e prova l'exe nel controllo "Build" (senza allegare lo zip). 
 pip install -r requirements.txt -r requirements-build.txt
 python tools/build_exe.py             # dist\PieDF\PieDF.exe e dist\PieDF-<versione>-win64.zip
 python tools/build_exe.py --onefile   # dist\PieDF.exe, un solo file (solo per confronto)
-python tests/run_all.py exe           # avvia l'exe e controlla processi, dati portatili, chiusura
+python tests/run_all.py exe           # avvia l'exe e controlla processi, dati portatili, chiusura, sigillo
 ```
+
+`check_exe.py` prova il sigillo nell'exe con un'opzione nascosta, senza finestra: `PieDF.exe --piedf-sigilla <pdf> <destinazione> <cartella del sigillo> <nome>` (uscita 0 se riuscito, altrimenti l'errore in `<destinazione>.errore.txt`).
 
 Si distribuisce la versione a cartella (onedir) dentro lo zip: il onefile si scompatta in una cartella temporanea a ogni avvio, quindi parte più lento. Le opzioni di build (moduli Qt esclusi, icona, informazioni di versione) sono in `piedf.spec`.
 

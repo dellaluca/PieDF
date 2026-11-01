@@ -1,2 +1,13 @@
 PySide6-Essentials==6.12.0
 PyMuPDF==2.0
+# Sigillo digitale (#70). Versioni fissate anche per le dipendenze che finiscono nell'exe;
+# aiohttp, lxml e oscrypto li vuole pyHanko ma l'exe li esclude (piedf.spec).
+pyHanko==0.38.0
+pyhanko-certvalidator==0.33.0
+cryptography==50.0.2
+cffi==2.1.1
+asn1crypto==1.5.1
+tzlocal==5.4.5
+tzdata==2026.6; sys_platform == "win32"
+certifi==2026.10.23
+uritools==6.1.3
