@@ -133,7 +133,9 @@ def main():
     check("la finestra si apre", win is not None, f"{secs:.1f} s" + (f" «{win[1]}»" if win else ""))
     if win:
         print(f"INFO onedir: avvio fino alla finestra {secs:.2f} s", flush=True)
-        check("titolo con il nome del file", "semplice.pdf" in win[1], win[1])
+        # La finestra si mostra (titolo «PieDF») prima di aprire il file: si aspetta il titolo.
+        title = wait_for(lambda: [w[1] for w in windows(pids()) if "semplice.pdf" in w[1]], WINDOW_TIMEOUT)
+        check("titolo con il nome del file", bool(title), str(title or [w[1] for w in windows(pids())]))
         time.sleep(2)  # il processo di render parte subito dopo la finestra
         running = pids()
         # Anche: nessun processo di verifica del sigillo per un PDF senza firme (#71).
