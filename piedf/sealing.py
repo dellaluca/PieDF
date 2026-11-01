@@ -552,8 +552,10 @@ def seal_status(path: str, password: str | None = None, folder: Path | None = No
         return status
     try:
         # Nessuna radice di fiducia e niente rete: si controllano solo integrità e modifiche.
-        context = ValidationContext(allow_fetching=False)
-        result = validate_pdf_signature(sig, context, ValidationContext(allow_fetching=False))
+        # `trust_roots=[]` esplicito: senza, pyHanko legge le radici di sistema con oscrypto,
+        # che l'exe non ha (lo spec lo esclude) e la verifica fallirebbe sempre.
+        context = ValidationContext(trust_roots=[], allow_fetching=False)
+        result = validate_pdf_signature(sig, context, ValidationContext(trust_roots=[], allow_fetching=False))
     except Exception:
         return status
     ts = result.timestamp_validity

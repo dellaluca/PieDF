@@ -8,6 +8,7 @@ La marca temporale si prova con un servizio finto su 127.0.0.1 (DummyTimeStamper
 mai con quello vero. Fuori da Windows DPAPI non c'è: `sealing` usa una protezione locale con lo
 stesso comportamento e il controllo specifico di DPAPI si salta.
 """
+import ast
 import asyncio
 import datetime
 import glob
@@ -573,6 +574,29 @@ def main():
     certify(PDFS / "modulo.pdf", foreign, outsider)  # i campi restano (non appiattito)
     check("#71 seal_status: certificazione di un altro programma integra",
           getattr(sealing.seal_status(str(foreign), None, folder), "state", None) == sealing.INTACT)
+    # Come nell'exe: i moduli che piedf.spec esclude (oscrypto, requests, aiohttp…) non ci sono.
+    # Senza `trust_roots=[]` pyHanko caricava le radici di sistema con oscrypto e nell'exe ogni
+    # sigillo risultava «non valido» (Build Windows della PR #82).
+    spec = ast.parse((ROOT / "piedf.spec").read_text(encoding="utf-8"))
+    excluded = next(ast.literal_eval(n.value) for n in spec.body
+                    if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "EXCLUDES")
+    blocked = sorted({m for m in excluded if not m.startswith("PySide6")})
+    probe = (
+        "import sys, importlib.abc\n"
+        f"BLOCKED = {blocked!r}\n"
+        "class Block(importlib.abc.MetaPathFinder):\n"
+        "    def find_spec(self, name, path, target=None):\n"
+        "        if name.split('.')[0] in BLOCKED: raise ModuleNotFoundError(name)\n"
+        "sys.meta_path.insert(0, Block())\n"
+        "from pathlib import Path\n"
+        "from piedf import sealing\n"
+        "s = sealing.seal_status(sys.argv[1], None, Path(sys.argv[2]))\n"
+        "print(s.state if s else None, s.own if s else None)\n"
+    )
+    out = subprocess.run([sys.executable, "-c", probe, str(personal), str(work / "sigillo_anna")],
+                         capture_output=True, text=True, cwd=ROOT).stdout.strip().splitlines()
+    check("#71 seal_status senza i moduli esclusi dall'exe (oscrypto…): integro e «da te»",
+          out[-1:] == [f"{sealing.INTACT} True"], f"{out[-1:]} bloccati: {blocked}")
     open_locked(foreign)
     check("#71 1. certificato di un altro programma: nome e «identità non verificata da PieDF»",
           bar() is not None and re.fullmatch(f"Firmato e bloccato {DATE} da Ditta Esterna Srl "
