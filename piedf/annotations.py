@@ -52,10 +52,10 @@ def fitted_rect(box: TextBox, rect: QRectF, page_size: tuple[float, float] | Non
     """
     text = changes.get("text", box.text)
     font, size = changes.get("font", box.font), changes.get("size", box.size)
-    width = max(rect.width(), MIN_BOX_WIDTH, longest_word(text, font, size))
+    width = max(rect.width(), MIN_BOX_WIDTH, longest_word(text, font, size, box.embedded))
     if page_size is not None:
         width = min(width, page_size[0])
-    height = text_box_height(text or " ", font, size, width)
+    height = text_box_height(text or " ", font, size, width, box.embedded)
     rect = QRectF(rect.x(), rect.y(), width, height)
     if page_size is not None:
         page_w, page_h = page_size
@@ -118,7 +118,8 @@ class Annotations(QObject):
     def image(self, box: TextBox, scale: float) -> QImage:
         """Aspetto della casella com'è nel PDF salvato (lo disegna MuPDF), alla scala data."""
         x0, y0, x1, y1 = box.rect
-        key = (x1 - x0, y1 - y0, box.text, box.font, box.size, box.color, box.align, round(scale, 4))
+        embedded = box.embedded and (box.embedded.xref, box.embedded.base_font)
+        key = (x1 - x0, y1 - y0, box.text, box.font, embedded, box.size, box.color, box.align, round(scale, 4))
         image = self._images.get(key)
         if image is None:
             if len(self._images) >= IMAGE_CACHE:
@@ -208,7 +209,8 @@ def _render(box: TextBox, scale: float) -> QImage:
     try:
         page = doc.new_page(width=max(x1 - x0, 1.0), height=max(y1 - y0, 1.0))
         add_text_box(page, TextBox(0, (0, 0, page.rect.width, page.rect.height), text=box.text,
-                                   font=box.font, size=box.size, color=box.color, align=box.align))
+                                   font=box.font, size=box.size, color=box.color, align=box.align,
+                                   embedded=box.embedded))
         pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=True)
         # Le pixmap di MuPDF con alfa sono premoltiplicate.
         return QImage(pix.samples, pix.width, pix.height, pix.stride,

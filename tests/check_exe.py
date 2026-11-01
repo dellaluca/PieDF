@@ -62,6 +62,14 @@ def close_window(hwnd) -> None:
     ctypes.windll.user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
 
 
+def exe_env(extra=None) -> dict:
+    """Ambiente per l'exe: senza QT_QPA_PLATFORM (run_all.py la imposta a offscreen per gli altri controlli)."""
+    env = dict(os.environ)
+    env.pop("QT_QPA_PLATFORM", None)
+    env.update(extra or {})
+    return env
+
+
 def size_mb(path: Path) -> float:
     files = [path] if path.is_file() else [p for p in path.rglob("*") if p.is_file()]
     return sum(p.stat().st_size for p in files) / 1e6
@@ -93,7 +101,7 @@ def main():
     def run(exe: Path, pdf: Path, env=None):
         """Avvia l'exe e aspetta la finestra: (processo, finestra, secondi) oppure finestra None."""
         t = time.perf_counter()
-        proc = subprocess.Popen([str(exe), str(pdf)], env=env)
+        proc = subprocess.Popen([str(exe), str(pdf)], env=exe_env() if env is None else env)
         win = wait_for(lambda: [w for w in windows(pids()) if "PieDF" in w[1]], WINDOW_TIMEOUT)
         return proc, (win[0] if win else None), time.perf_counter() - t
 
@@ -164,7 +172,7 @@ def main():
         if denied.returncode != 0 or _can_write(ro / "PieDF"):
             print("SKIP cartella non scrivibile: icacls non ha tolto la scrittura", denied.stdout, flush=True)
         else:
-            env = dict(os.environ, APPDATA=str(appdata))
+            env = exe_env({"APPDATA": str(appdata)})
             proc, win, secs = run(ro / "PieDF" / "PieDF.exe", pdf, env)
             check("non scrivibile: la finestra si apre", win is not None, f"{secs:.1f} s")
             check("non scrivibile: niente data/ accanto all'exe", not (ro / "PieDF" / "data").exists())
@@ -192,7 +200,7 @@ def main():
     t = time.perf_counter()
     try:
         code = subprocess.run([str(EXE), "--piedf-sigilla", str(PDFS / "modulo.pdf"), str(sealed),
-                               str(seal_dir / "sigillo"), "Prova Exe"], timeout=120).returncode
+                               str(seal_dir / "sigillo"), "Prova Exe"], timeout=120, env=exe_env()).returncode
     except subprocess.TimeoutExpired:
         code = "timeout"
     error = Path(str(sealed) + ".errore.txt")

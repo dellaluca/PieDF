@@ -377,12 +377,13 @@ def _timestamper(url: str):
 
 
 def seal(src: str, password: str | None, dest: str, folder: Path, tsa_url: str | None = None,
-         name: str | None = None) -> None:
+         name: str | None = None, cert_id: str | None = None) -> None:
     """Appiattisce `src` e lo scrive in `dest` (anche lo stesso file) con il sigillo.
 
     `tsa_url` = marca temporale (PAdES B-T), None = senza (B-B). `name` = crea prima un
-    certificato personale nuovo con questo nome. Solleva `SealError` (o le sue sottoclassi):
-    in quel caso `dest` non è stato toccato.
+    certificato personale nuovo con questo nome. `cert_id` = impronta del certificato con cui
+    firmare (#75, `certificates`), None = il sigillo personale. Solleva `SealError` (o le sue
+    sottoclassi): in quel caso `dest` non è stato toccato.
     """
     _stub_aiohttp()
     from pyhanko.pdf_utils.crypt import AuthStatus
@@ -392,7 +393,12 @@ def seal(src: str, password: str | None, dest: str, folder: Path, tsa_url: str |
 
     if name is not None:
         create_identity(folder, name)
-    cert, key = load_identity(folder)
+    if cert_id is None:
+        cert, key = load_identity(folder)
+        chain = []
+    else:
+        from piedf import certificates
+        cert, key, chain = certificates.load_signer(folder, cert_id)
 
     try:
         doc = pymupdf.open(src)
@@ -430,7 +436,7 @@ def seal(src: str, password: str | None, dest: str, folder: Path, tsa_url: str |
         raise SealError(f"{ENCRYPTION_UNSUPPORTED}\n\nDettagli: {e}") from e
 
     signer = signers.SimpleSigner(
-        signing_cert=cert, signing_key=key, cert_registry=SimpleCertificateStore.from_certs([cert]),
+        signing_cert=cert, signing_key=key, cert_registry=SimpleCertificateStore.from_certs([cert, *chain]),
     )
     meta = signers.PdfSignatureMetadata(
         field_name=FIELD_NAME, certify=True, docmdp_permissions=fields.MDPPerm.NO_CHANGES,
@@ -547,7 +553,7 @@ def seal_status(path: str, password: str | None = None, folder: Path | None = No
         subject = cert.subject.native
         status.signer = subject.get("common_name") or cert.subject.human_friendly
         status.personal = subject.get("organization_name") == ORGANIZATION
-        status.own = folder is not None and _own_key(Path(folder)) == cert.public_key.dump()
+        status.own = folder is not None and cert.public_key.dump() in _own_keys(Path(folder))
     except Exception:
         return status
     try:
@@ -572,16 +578,29 @@ def seal_status(path: str, password: str | None = None, folder: Path | None = No
     return status
 
 
-def _own_key(folder: Path) -> bytes | None:
-    """Chiave pubblica (DER) del certificato personale, None se non c'è."""
-    try:
-        from asn1crypto import pem, x509
-        data = (folder / CERT_FILE).read_bytes()
+def _own_keys(folder: Path) -> set[bytes]:
+    """Chiavi pubbliche (DER) dei certificati di questo utente: il sigillo personale e i
+    certificati importati (#75) la cui chiave si decifra su questo PC."""
+    from asn1crypto import pem, x509
+
+    def public(path: Path) -> bytes:
+        data = path.read_bytes()
         if pem.detect(data):
-            data = pem.unarmor(data)[2]
+            data = pem.unarmor(data)[2]  # il primo blocco: il certificato, poi la catena
         return x509.Certificate.load(data).public_key.dump()
+
+    keys = set()
+    try:
+        keys.add(public(folder / CERT_FILE))
     except Exception:
-        return None
+        pass
+    for crt in sorted(folder.glob("*.crt")) if folder.is_dir() else []:
+        try:
+            unprotect(crt.with_suffix(".key").read_bytes())
+            keys.add(public(crt))
+        except Exception:
+            continue
+    return keys
 
 
 def describe(status: SealStatus) -> str:
@@ -655,11 +674,11 @@ def cli(args: list[str]) -> int:
         return 1
 
 
-def run(src, password, dest, folder, tsa_url, name, results) -> None:
+def run(src, password, dest, folder, tsa_url, name, cert_id, results) -> None:
     """Processo del sigillo: ("done",) oppure ("error", tipo, messaggio) con tipo
     "signed" / "foreign" / "timestamp" / "error"."""
     try:
-        seal(src, password, dest, Path(folder), tsa_url, name)
+        seal(src, password, dest, Path(folder), tsa_url, name, cert_id)
         results.put(("done",))
     except AlreadySigned as e:
         results.put(("error", "signed", str(e)))

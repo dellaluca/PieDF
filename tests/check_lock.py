@@ -597,6 +597,23 @@ def main():
                          capture_output=True, text=True, cwd=ROOT).stdout.strip().splitlines()
     check("#71 seal_status senza i moduli esclusi dall'exe (oscrypto…): integro e «da te»",
           out[-1:] == [f"{sealing.INTACT} True"], f"{out[-1:]} bloccati: {blocked}")
+    # #75: un certificato importato con la chiave decifrabile qui è «da te»; con la chiave
+    # di un altro PC (non decifrabile) no.
+    from piedf import certificates
+    imported = work / "sigillo_importato"
+    imported.mkdir()
+    fp = certificates.fingerprint(outsider[0].dump())
+    (imported / (fp + certificates.CRT)).write_bytes(certificates._pem(outsider[0].dump()))
+    (imported / (fp + certificates.KEY)).write_bytes(sealing.protect(outsider[1].dump()))
+    status = sealing.seal_status(str(foreign), None, imported)
+    check("#71/#75 certificato importato con la chiave di questo PC: «da te (Ditta Esterna Srl)»",
+          getattr(status, "own", None) is True
+          and sealing.describe(status).startswith("Firmato e bloccato il ") and "da te (Ditta Esterna Srl)" in sealing.describe(status),
+          sealing.describe(status) if status else None)
+    (imported / (fp + certificates.KEY)).write_bytes(b"chiave di un altro PC")
+    status = sealing.seal_status(str(foreign), None, imported)
+    check("#71/#75 certificato importato con la chiave di un altro PC: non «da te»",
+          getattr(status, "own", None) is False, str(status))
     open_locked(foreign)
     check("#71 1. certificato di un altro programma: nome e «identità non verificata da PieDF»",
           bar() is not None and re.fullmatch(f"Firmato e bloccato {DATE} da Ditta Esterna Srl "

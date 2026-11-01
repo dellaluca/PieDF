@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QEvent, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QFontDatabase, QIcon, QKeySequence, QPixmap
 from PySide6.QtPrintSupport import QAbstractPrintDialog, QPrintDialog, QPrinter, QPrinterInfo
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
@@ -31,8 +31,9 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
-from piedf import data_import, paths
+from piedf import certificates, data_import, paths, fonts
 from piedf.about_dialog import AboutDialog
+from piedf.certificates_dialog import DEFAULT_KEY, CertificatesDialog, ask_foreign, import_certificate
 from piedf.annotations import (
     COLORS,
     DEFAULT_DRAW,
@@ -49,7 +50,7 @@ from piedf.annotations import (
     TOOL_LABELS,
     Annotations,
 )
-from piedf.document import OpenError, PasswordRequired, PdfDocument, open_document
+from piedf.document import OpenError, PasswordRequired, PdfDocument, TextBox, open_document
 from piedf.external import open_external
 from piedf.forms import FormValues
 from piedf.locking import LockDialog, SealCheckJob, SealJob, ask_seal_name
@@ -68,10 +69,14 @@ from piedf.sidebar import PAGES_TAB, TOC_TAB, Sidebar
 from piedf.signature_dialog import SignatureDialog
 from piedf.signature_manager import SignatureManager, choose_data_folder, thumbnail_pixmap
 from piedf.signatures import Kind, Signature, SignatureStore
-from piedf.viewer import FitMode, PdfView
+from piedf.viewer import BOX_FONTS, FitMode, PdfView
 from piedf.writer import SaveError, has_digital_signatures, save_with_signatures
 
 MAX_RECENT = 10
+MAX_RECENT_FONTS = 5
+MISSING_FONT_ROLE = Qt.ItemDataRole.UserRole + 1  # voce del font di una casella che qui non è installato
+FONTS_RETRY_MS = 200  # l'elenco dei font lo legge un processo: finché non è pronto ci sono solo i tre standard
+FONTS_LOADING = "Caricamento dei font…"
 POSITION_SAVE_MS = 30_000
 FIT_NAMES = {FitMode.WIDTH: "width", FitMode.PAGE: "page", FitMode.NONE: None}
 FIT_LABELS = {FitMode.WIDTH: "Adatta larghezza", FitMode.PAGE: "Adatta pagina"}
@@ -86,6 +91,8 @@ COPY_HINT = "Copia del testo…"
 COPY_DIALOG_MS = 500  # una copia che dura di più mostra l'avanzamento, con Annulla
 ALIGN_LABELS = ["Sinistra", "Centro", "Destra"]
 FORM_MESSAGE = "Questo documento contiene campi compilabili."
+NOT_INSTALLED = "{} (non installato)"
+FONT_FALLBACK = "Il font «{}» non è installato e non ha tutti i caratteri del testo: la casella usa Helvetica."
 XFA_MESSAGE = "Questo modulo usa una tecnologia (XFA) che PieDF non supporta: i campi non si possono compilare."
 MAX_HISTORY = 50
 SIDEBAR_WIDTH = 220  # px logici, larghezza del pannello laterale la prima volta
@@ -170,6 +177,7 @@ class MainWindow(QMainWindow):
         self.view.copy_busy.connect(self._on_copy_busy)
         self.view.copy_progress.connect(self._on_copy_progress)
         self.view.copy_failed.connect(self._on_copy_failed)
+        self.view.font_fallback.connect(lambda family: self.statusBar().showMessage(FONT_FALLBACK.format(family), 10_000))
         self.view.set_highlight(self._settings.value("highlight_fields", True, type=bool))
         self.search_bar = SearchBar(self.view, self._renderer, self.annotations)
         self.search_bar.show_hit.connect(self._show_search_hit)
@@ -354,6 +362,7 @@ class MainWindow(QMainWindow):
         sign_menu.addAction("Crea &iniziali…", lambda: self.create_signature(Kind.INITIALS))
         sign_menu.addSeparator()
         sign_menu.addAction("&Gestisci firme…", self.manage_signatures)
+        sign_menu.addAction("&Certificati…", self.manage_certificates)
         sign_menu.addSeparator()
         sign_menu.addAction(self.act_text)
         sign_menu.addAction(self.act_date)
@@ -538,9 +547,21 @@ class MainWindow(QMainWindow):
         # Senza focus: l'editor della casella resta attivo mentre si cambia il formato.
         self.font_box = QComboBox()
         self.font_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        for font, label in FONT_LABELS.items():
-            self.font_box.addItem(label, font)
-        self.font_box.activated.connect(lambda _: self._set_text_style(font=self.font_box.currentData()))
+        # Larghezza fissa: senza, la combo misurerebbe ogni voce nel suo font.
+        self.font_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.font_box.setMinimumContentsLength(16)
+        self.font_box.setMaxVisibleItems(20)
+        self.font_box.activated.connect(lambda _: self._choose_font(self.font_box.currentData()))
+        # L'elenco dei font installati si chiede solo quando serve (`_request_fonts`): mai all'avvio.
+        self._font_box_full = False
+        self._fonts_timer = QTimer(self)
+        self._fonts_timer.setSingleShot(True)
+        self._fonts_timer.setInterval(FONTS_RETRY_MS)
+        self._fonts_timer.timeout.connect(self._fill_font_box)
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(fonts.shutdown)
+        self._fill_font_box()
         bar.addWidget(self.font_box)
         self.size_box = QSpinBox()
         self.size_box.setRange(MIN_SIZE, MAX_SIZE)
@@ -576,13 +597,67 @@ class MainWindow(QMainWindow):
             "color": s.value("text/color", DEFAULT_STYLE["color"], type=str),
             "align": s.value("text/align", DEFAULT_STYLE["align"], type=int),
         }
-        if style["font"] not in FONT_LABELS:
+        if not style["font"]:  # un font non più installato lo sostituisce la vista alla prossima casella
             style["font"] = DEFAULT_STYLE["font"]
         if style["color"] not in COLORS:
             style["color"] = DEFAULT_STYLE["color"]
         style["size"] = float(max(MIN_SIZE, min(MAX_SIZE, style["size"])))
         style["align"] = style["align"] if 0 <= style["align"] < 3 else 0
         return style
+
+    def _fill_font_box(self) -> None:
+        """Ultimi usati, poi Helvetica/Times/Courier, poi i font installati in ordine alfabetico,
+        ognuno scritto nel suo font. Finché l'elenco non è pronto (processo di `fonts.request`)
+        ci sono solo i tre standard con «Caricamento dei font…» e si riprova poco dopo."""
+        combo = self.font_box
+        ready = fonts.ready()
+        loading = not ready and fonts.loading()
+        self._font_box_full = ready
+        families = []
+        if ready:
+            known = set(QFontDatabase.families())  # solo quelli che anche l'editor sa mostrare
+            families = sorted((f for f in fonts.installed() if f in known and f not in FONT_LABELS), key=str.casefold)
+        recent = [f for f in self._recent_fonts() if f in FONT_LABELS or f in families]
+        combo.blockSignals(True)
+        combo.clear()
+        size = combo.font().pointSizeF()
+        for group in (recent, list(FONT_LABELS), families):
+            if group and combo.count():
+                combo.insertSeparator(combo.count())
+            for family in group:
+                face, hint = BOX_FONTS.get(family, (family, QFont.StyleHint.AnyStyle))
+                font = QFont(face)
+                font.setStyleHint(hint)
+                font.setPointSizeF(size)
+                combo.addItem(FONT_LABELS.get(family, family), family)
+                combo.setItemData(combo.count() - 1, font, Qt.ItemDataRole.FontRole)
+        if loading:
+            combo.insertSeparator(combo.count())
+            combo.addItem(FONTS_LOADING)
+            combo.model().item(combo.count() - 1).setEnabled(False)
+        combo.blockSignals(False)
+        if loading:
+            self._fonts_timer.start()
+        elif ready and self.text_bar.isVisible():
+            self._update_text_bar(self.view.active_text_box)
+
+    def _request_fonts(self) -> None:
+        """L'elenco dei font installati serve: lo legge un processo a parte, la tendina si
+        riempie quando arriva (Testo/Data, casella selezionata, documento con font non standard)."""
+        fonts.request()
+        if not self._font_box_full:
+            self._fill_font_box()
+
+    def _recent_fonts(self) -> list[str]:
+        return [f for f in self._settings.value("text/recent_fonts", [], type=list) if f][:MAX_RECENT_FONTS]
+
+    def _choose_font(self, family: str | None) -> None:
+        if not family:
+            return
+        recent = [family] + [f for f in self._recent_fonts() if f != family]
+        self._settings.setValue("text/recent_fonts", recent[:MAX_RECENT_FONTS])
+        self._fill_font_box()
+        self._set_text_style(font=family)
 
     def _set_text_style(self, **changes) -> None:
         for key, value in changes.items():
@@ -593,9 +668,18 @@ class MainWindow(QMainWindow):
         if box is None:
             self.text_bar.hide()
             return
+        self._request_fonts()
         for widget in (self.font_box, self.size_box, self.color_box):
             widget.blockSignals(True)
-        self.font_box.setCurrentIndex(max(0, self.font_box.findData(box.font)))
+        combo = self.font_box
+        for i in reversed(range(combo.count())):
+            if combo.itemData(i, MISSING_FONT_ROLE):
+                combo.removeItem(i)
+        if combo.findData(box.font) < 0 and box.font not in FONT_LABELS:
+            # Font della casella non installato qui: l'aspetto è quello incorporato nel file.
+            combo.insertItem(0, NOT_INSTALLED.format(box.font) if fonts.ready() else box.font, box.font)
+            combo.setItemData(0, True, MISSING_FONT_ROLE)
+        combo.setCurrentIndex(max(0, combo.findData(box.font)))
         self.size_box.setValue(round(box.size))
         index = self.color_box.findData(box.color)
         self.color_box.setCurrentIndex(index)  # -1 = un colore non della lista (da un altro programma)
@@ -831,6 +915,8 @@ class MainWindow(QMainWindow):
         self.sidebar.set_current(self.view.current_page)
         self.forms.set_fields(doc.fields)
         self.annotations.set_items(doc.annotations)
+        if any(isinstance(a, TextBox) and a.font not in fonts.STANDARD for a in doc.annotations):
+            self._request_fonts()
         self._update_form_bar(doc)
         self._check_seal(doc)
         self.search_bar.reset(self._gen)
@@ -1164,23 +1250,45 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Salva e blocca", ALREADY_SIGNED)
             return False
 
-        dialog = LockDialog(self._settings.value("lock/timestamp", False, type=bool), self)
+        # Con certificati importati (#75) si sceglie con quale firmare; cryptography si carica
+        # solo in quel caso, per leggerne i nomi.
+        folder = seal_dir(paths.data_dir())
+        cert_id = certificates.resolve(folder, self._settings.value(DEFAULT_KEY, "", type=str))
+        choices = []
+        if certificates.imported_fingerprints(folder):
+            choices = [(info.label, info.fingerprint) for info in certificates.entries(folder)]
+        dialog = LockDialog(self._settings.value("lock/timestamp", False, type=bool), self, choices, cert_id)
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         timestamp = dialog.timestamp()
+        cert_id = dialog.certificate() or cert_id
         dialog.deleteLater()
         if not accepted:
             return False
         self._settings.setValue("lock/timestamp", timestamp)
 
-        folder = seal_dir(paths.data_dir())
-        state = identity_state(folder)
-        if state == "foreign" and not self._ask("Sigillo personale", FOREIGN, "Crea nuovo"):
-            return False
         name = None
-        if state != "ok":
-            name = ask_seal_name(self, default_name())
-            if name is None:
+        if cert_id is not None and cert_id != certificates.personal_fingerprint(folder):
+            if certificates.key_state(folder, cert_id) == "foreign":
+                info = next((i for i in certificates.entries(folder) if i.fingerprint == cert_id), None)
+                QMessageBox.warning(self, "Salva e blocca", certificates.IMPORTED_FOREIGN.format(
+                    name=info.name if info else ""))
                 return False
+        else:
+            cert_id = None  # il sigillo personale (anche da creare)
+            state = identity_state(folder)
+            if state == "foreign":
+                answer = ask_foreign(self)
+                if answer == "import":
+                    import_certificate(self, folder, self._settings)
+                    state = identity_state(folder)
+                    if state != "ok":
+                        return False
+                elif answer != "new":
+                    return False
+            if state != "ok":
+                name = ask_seal_name(self, default_name())
+                if name is None:
+                    return False
 
         src = Path(self._shown_path())
         proposed = str(src.with_name(f"{src.stem}_bloccato.pdf"))
@@ -1190,11 +1298,12 @@ class MainWindow(QMainWindow):
             return False
         if not Path(dest).suffix:
             dest += ".pdf"
-        return self._lock_to(os.path.abspath(dest), TSA_URL if timestamp else None, name)
+        return self._lock_to(os.path.abspath(dest), TSA_URL if timestamp else None, name, cert_id)
 
-    def _lock_to(self, dest: str, tsa_url: str | None, name: str | None) -> bool:
+    def _lock_to(self, dest: str, tsa_url: str | None, name: str | None, cert_id: str | None = None) -> bool:
         """Scrive le modifiche in un temporaneo (come la stampa) e lo fa sigillare in `dest`
-        da `SealJob`; alla fine riapre `dest` come dopo Salva."""
+        da `SealJob` con il certificato `cert_id` (None = sigillo personale); alla fine riapre
+        `dest` come dopo Salva."""
         self.view.cancel_placing()
         password = self._password
         try:
@@ -1215,7 +1324,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Blocco non riuscito", "Il documento è ancora in uso, riprova.")
             return False
 
-        job = SealJob(source, password, dest, seal_dir(paths.data_dir()), tsa_url, name, self)
+        job = SealJob(source, password, dest, seal_dir(paths.data_dir()), tsa_url, name, cert_id, self)
         self._seal_job = job
         gen = self._gen
         progress = QProgressDialog("Blocco del PDF…", "Annulla", 0, 0, self)
@@ -1248,12 +1357,18 @@ class MainWindow(QMainWindow):
                 self.view.reload()
             if result == "timestamp":
                 if self._ask("Marca temporale", message, "Blocca senza"):
-                    self._lock_to(dest, None, None)
+                    self._lock_to(dest, None, None, cert_id)
             elif result == "foreign":
-                if self._ask("Sigillo personale", message, "Crea nuovo"):
+                answer = ask_foreign(self)
+                if answer == "new":
                     new_name = ask_seal_name(self, default_name())
                     if new_name is not None:
                         self._lock_to(dest, tsa_url, new_name)
+                elif answer == "import":
+                    folder = seal_dir(paths.data_dir())
+                    import_certificate(self, folder, self._settings)
+                    if identity_state(folder) == "ok":
+                        self._lock_to(dest, tsa_url, None)
             elif result == "signed":
                 QMessageBox.warning(self, "Salva e blocca", message)
             elif result:
@@ -1637,6 +1752,11 @@ class MainWindow(QMainWindow):
     def manage_signatures(self) -> None:
         SignatureManager(self.signatures, self).exec()
 
+    def manage_certificates(self) -> None:
+        dialog = CertificatesDialog(seal_dir(paths.data_dir()), self._settings, self)
+        dialog.exec()
+        dialog.deleteLater()
+
     def place_signature(self, signature: Signature) -> None:
         for menu in (self._sign_menu, self._insert_sign_menu, self._tools_menu):
             menu.close()
@@ -1679,6 +1799,7 @@ class MainWindow(QMainWindow):
     def _on_text_tool_changed(self, active: bool) -> None:
         self._update_enabled()
         if active:
+            self._request_fonts()
             self.statusBar().showMessage(DATE_HINT if self.view.date_tool else TEXT_HINT)
         elif self.statusBar().currentMessage() in (TEXT_HINT, DATE_HINT):
             self.statusBar().clearMessage()
