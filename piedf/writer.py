@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pymupdf
 
-from piedf.document import Ink, TextBox, add_ink, add_text_box, set_field_value
+from piedf.document import Ink, TextBox, add_ink, add_text_box, embed_fonts, set_field_value
 
 TMP_SUFFIX = ".piedf-tmp"
 
@@ -71,9 +71,10 @@ def save_with_signatures(
                 annot = page.load_annot(xref)
                 if annot is not None:
                     page.delete_annot(annot)
+            font_xrefs = embed_fonts(doc, [item for item in items if isinstance(item, TextBox)])
             for item in items:
                 if isinstance(item, TextBox):
-                    add_text_box(doc[item.page], item)
+                    add_text_box(doc[item.page], item, font_xrefs.get(id(item), 0))
                 elif isinstance(item, Ink):
                     add_ink(doc[item.page], item)
 

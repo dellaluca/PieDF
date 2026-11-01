@@ -14,7 +14,7 @@ Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa
 - **Cercare e copiare**: trova una parola in tutto il documento e seleziona il testo per copiarlo.
 - **Firmare**: crea la tua firma (o le iniziali) disegnandola, scrivendola in corsivo o da una foto, e mettila dove serve. Le firme restano salvate per le volte successive, e da «Le mie firme» puoi importare quelle di un'altra cartella di PieDF.
 - **Compilare i moduli**: caselle di testo, spunte e scelte dei moduli PDF.
-- **Scrivere e disegnare**: aggiungi caselle di testo, la data, tratti a mano libera ed evidenziazioni, modificabili anche dopo il salvataggio.
+- **Scrivere e disegnare**: aggiungi caselle di testo (con i font installati sul PC: il PDF si vede uguale anche dove quel font non c'è), la data, tratti a mano libera ed evidenziazioni, modificabili anche dopo il salvataggio.
 - **Organizzare le pagine**: riordina, ruota, elimina pagine, inserisci pagine da altri PDF ed estraine una parte in un file nuovo.
 - **Salvare e bloccare**: sigilla il PDF firmato con un sigillo digitale personale, così ogni modifica fatta dopo con un altro programma viene segnalata da chi controlla le firme. Su richiesta aggiunge una data certa (marca temporale).
 - **Certificati**: da Strumenti › Certificati… fai una copia di sicurezza del sigillo personale (protetta da una password) per portarlo su un altro PC, oppure importa un certificato .p12/.pfx (per esempio quello della tua azienda) e firma con quello. Se ne hai più di uno, scegli con quale bloccare il PDF.
