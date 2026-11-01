@@ -111,7 +111,7 @@ def closed_port_url() -> str:
 def main():
     import pymupdf
     from PySide6.QtCore import QRectF, Qt, QTimer
-    from PySide6.QtGui import QColor, QImage, QPainter, QPen
+    from PySide6.QtGui import QAction, QColor, QImage, QPainter, QPen
     from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QInputDialog, QMessageBox
 
     import piedf.paths as paths
@@ -351,7 +351,9 @@ def main():
     warnings.clear(); lock_shown.clear(); save_asked.clear()
     again = work / "di_nuovo.pdf"
     started, _ = lock(again)
-    check("4. un PDF già bloccato non si blocca di nuovo", not started and warnings == [sealing.ALREADY_SIGNED], str(warnings))
+    # Il documento bloccato si legge soltanto (#71): «Salva e blocca» è disattivato e non fa niente.
+    check("4. un PDF già bloccato non si blocca di nuovo (azione disattivata)",
+          not started and not w.act_lock.isEnabled() and not warnings, str(warnings))
     check("4. nessun dialog né file", not lock_shown and not save_asked and not again.exists())
 
     signed = work / "firmato_pyhanko.pdf"
@@ -499,6 +501,274 @@ def main():
           w._seal_job is None and not cancelled.exists() and no_leftovers(work), w.statusBar().currentMessage())
     check("annullato: barra di stato «Blocco annullato»", w.statusBar().currentMessage() == "Blocco annullato")
     check("annullato: il documento resta aperto", w._path == str(cancel_src))
+
+    # === #71: stato del sigillo all'apertura e sola lettura ===
+    import re
+    import piedf.locking as locking
+    from PySide6.QtTest import QTest
+    from piedf.document import open_document
+    v = w.view
+
+    def wait_seal(timeout=60):
+        """Aspetta la fine della verifica del sigillo misurando le pause della GUI."""
+        last = [time.perf_counter()]
+        worst = [0.0]
+
+        def tick():
+            now = time.perf_counter()
+            worst[0] = max(worst[0], now - last[0])
+            last[0] = now
+        timer = QTimer(); timer.setInterval(10); timer.timeout.connect(tick); timer.start()
+        t = time.perf_counter()
+        while w._seal_check is not None and time.perf_counter() - t < timeout:
+            app.processEvents(); time.sleep(0.005)
+        timer.stop()
+        pump(0.05)
+        return worst[0]
+
+    def open_locked(path, password=None):
+        w.open_file(str(path), password)
+        checking = w.seal_bar.isVisible() and w.seal_label.text() == sealing.CHECKING_TEXT
+        gap = wait_seal()
+        return checking, gap
+
+    def bar():
+        return w.seal_label.text() if w.seal_bar.isVisible() else None
+
+    def alert():
+        return w.seal_bar.styleSheet() == main_window.SEAL_BAR_ALERT
+
+    def certify(src_pdf, dest_pdf, who):
+        """Firma di certificazione DocMDP 1 «di un altro programma» (pyHanko, senza appiattire)."""
+        with open(src_pdf, "rb") as f:
+            writer = IncrementalPdfFileWriter(io.BytesIO(f.read()))
+        with open(dest_pdf, "wb") as out:
+            signers.PdfSigner(signers.PdfSignatureMetadata(
+                field_name="Certificazione", certify=True, docmdp_permissions=MDPPerm.NO_CHANGES,
+            ), signers.SimpleSigner(
+                signing_cert=who[0], signing_key=who[1], cert_registry=SimpleCertificateStore.from_certs([who[0]]),
+            )).sign_pdf(writer, output=out)
+
+    DATE = r"il \d\d/\d\d/\d{4} alle \d\d:\d\d"
+
+    # --- 1. Integro ---
+    mine = other_pc  # bloccato con il certificato personale attuale (Luca Bianchi)
+    checking, gap = open_locked(mine)
+    check("#71 1. all'apertura la barra dice «Controllo del sigillo…»", checking, bar())
+    check("#71 1. bloccato da me: «Firmato e bloccato il … alle … da te (Luca Bianchi)»",
+          bar() is not None and re.fullmatch(f"Firmato e bloccato {DATE} da te \\(Luca Bianchi\\)", bar()) and not alert(),
+          str(bar()))
+    check("#71 1. la GUI non resta ferma più di 150 ms durante la verifica", gap < MAX_GAP, f"{gap * 1000:.0f} ms")
+    check("#71 1. sola lettura", w._locked and v.read_only)
+
+    personal = work / "sigillo_di_anna.pdf"
+    sealing.seal(str(PDFS / "semplice.pdf"), None, str(personal), work / "sigillo_anna", None, "Anna Neri")
+    open_locked(personal)
+    check("#71 1. sigillo personale di un altro: nome e «identità non verificata»",
+          bar() is not None and re.fullmatch(f"Firmato e bloccato {DATE} da Anna Neri "
+                                             "\\(sigillo personale, identità non verificata\\)", bar()), str(bar()))
+
+    outsider = make_ca("Ditta Esterna Srl", key_usage(digital_signature=True, content_commitment=True))
+    foreign = work / "certificato_altro.pdf"
+    certify(PDFS / "modulo.pdf", foreign, outsider)  # i campi restano (non appiattito)
+    check("#71 seal_status: certificazione di un altro programma integra",
+          getattr(sealing.seal_status(str(foreign), None, folder), "state", None) == sealing.INTACT)
+    open_locked(foreign)
+    check("#71 1. certificato di un altro programma: nome e «identità non verificata da PieDF»",
+          bar() is not None and re.fullmatch(f"Firmato e bloccato {DATE} da Ditta Esterna Srl "
+                                             "\\(identità non verificata da PieDF\\)", bar()), str(bar()))
+
+    open_locked(stamped)  # semplice_bloccato.pdf: con la marca temporale, certificato di Mario Rossi (ora non più mio)
+    check("#71 1. con la marca temporale: «data certificata»",
+          bar() is not None and re.fullmatch(f"Firmato e bloccato {DATE} da Mario Rossi "
+                                             "\\(sigillo personale, identità non verificata, data certificata\\)", bar()),
+          str(bar()))
+
+    # --- 2. Modificato dopo / non valido ---
+    changed = work / "modificato_dopo.pdf"
+    shutil.copy(mine, changed)
+    d = pymupdf.open(changed)
+    d[0].insert_text((72, 72), "Aggiunto dopo il blocco")
+    d.save(changed, incremental=True, encryption=pymupdf.PDF_ENCRYPT_KEEP)
+    d.close()
+    open_locked(changed)
+    check("#71 2. salvataggio incrementale: barra rossa «modificato dopo essere stato bloccato»",
+          bar() is not None and alert() and re.fullmatch(
+              r"Attenzione: il documento è stato modificato dopo essere stato bloccato il \d\d/\d\d/\d{4} "
+              r"da te \(Luca Bianchi\)\.", bar()), str(bar()))
+    check("#71 2. sola lettura anche con il sigillo rotto", w._locked and not w.act_text.isEnabled())
+    rewritten = work / "riscritto.pdf"
+    d = pymupdf.open(mine)
+    d.save(rewritten, garbage=3)
+    d.close()
+    open_locked(rewritten)
+    check("#71 2. riscritto per intero: «Il sigillo di questo documento non è valido.» in rosso",
+          bar() == "Il sigillo di questo documento non è valido." and alert(), str(bar()))
+    check("#71 2. sola lettura anche con il sigillo non valido", w._locked and v.read_only)
+
+    # --- 3. Sola lettura ---
+    class FakeOrganizer:
+        opened = []
+
+        def __init__(self, *a, **k):
+            FakeOrganizer.opened.append(a)
+            self.sources, self.refs, self.changed = [], [], False
+
+        def add_document(self, *a, **k):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+        def deleteLater(self):
+            pass
+    real_organizer = main_window.PageOrganizer
+    main_window.PageOrganizer = FakeOrganizer
+    open_locked(foreign)
+    disabled = {
+        "Salva": w.act_save, "Salva e blocca": w.act_lock, "Inserisci firma": w._insert_sign_menu.menuAction(),
+        "Testo": w.act_text, "Data": w.act_date, "Disegna": w.act_draw, "Organizza pagine": w.act_organize,
+        "Unisci PDF": w.act_merge, "Ruota pagina a sinistra": w.act_rotate_left, "Ruota pagina a destra": w.act_rotate_right,
+        **{f"strumento {t}": a for t, a in w.draw_actions.items()},
+    }
+    on = [n for n, a in disabled.items() if a.isEnabled()]
+    check("#71 3. disattivate: Salva, Salva e blocca, Inserisci firma, Testo/Data, Disegna, Organizza, Ruota pagina",
+          not on and not w.sign_button.isEnabled() and not w.draw_button.isEnabled(), str(on))
+    tips = [n for n, a in disabled.items() if a.toolTip() != "Il documento è bloccato"]
+    check("#71 3. tooltip «Il documento è bloccato»",
+          not tips and w.sign_button.toolTip() == "Il documento è bloccato"
+          and w.draw_button.toolTip() == "Il documento è bloccato", str(tips))
+    enabled = {
+        "Salva con nome": w.act_save_as, "Stampa": w.act_print, "Trova": w.act_find, "Copia": w.act_copy,
+        "Seleziona tutto": w.act_select_all, "Pannello laterale": w.act_sidebar,
+        "Ruota vista a destra": w.act_view_right, "Ruota vista a sinistra": w.act_view_left,
+    }
+    off = [n for n, a in enabled.items() if not a.isEnabled()]
+    check("#71 3. attive: Salva con nome, stampa, ricerca, copia, pannello laterale, Ruota vista", not off, str(off))
+
+    save_asked.clear(); save_answers.clear(); errors.clear()
+    v.setFocus()
+    pump(0.05)
+    for key, mod in ((Qt.Key.Key_T, Qt.KeyboardModifier.ControlModifier), (Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier),
+                     (Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier),
+                     (Qt.Key.Key_O, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)):
+        QTest.keyClick(v, key, mod)
+        pump(0.02)
+    for action in disabled.values():
+        action.trigger()
+    pump(0.05)
+    check("#71 3. scorciatoie e azioni disattivate non fanno niente",
+          not v.text_tool and v.draw_tool is None and not v.placing and not save_asked and not FakeOrganizer.opened
+          and w._page_job is None and w._seal_job is None and not w.modified and w._path == str(foreign),
+          f"{save_asked} {FakeOrganizer.opened}")
+    v.start_text_tool(); v.start_draw_tool("pen"); v.start_placing(sig); w.set_draw_tool("pen")
+    w.organize_pages(); w.rotate_current(90)
+    check("#71 3. anche chiamati direttamente: niente strumenti, niente pagine",
+          not v.text_tool and v.draw_tool is None and not v.placing and not FakeOrganizer.opened and w._page_job is None)
+    check("#71 3. Salva e Salva e blocca non partono", not w.save() and not w.save_and_lock() and not save_asked)
+
+    fields = [f for f in w.forms.fields if f.name == "Nome"]
+    check("#71 3. il PDF certificato ha ancora i campi", bool(fields))
+    check("#71 3. barra dei moduli nascosta (i campi non si compilano)", not w.form_bar.isVisible())
+    if fields:
+        f = fields[0]
+        v.scroll_to_rect(f.page, QRectF(f.rect[0], f.rect[1], f.rect[2] - f.rect[0], f.rect[3] - f.rect[1]))
+        pump(0.1)
+        x0, y0, x1, y1 = f.rect
+        pos = v.page_rect_to_viewport(f.page, QRectF(x0, y0, x1 - x0, y1 - y0)).center().toPoint()
+        QTest.mouseMove(v.viewport(), pos)
+        QTest.mouseClick(v.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pos)
+        pump(0.05)
+        check("#71 3. clic su un campo: l'editor non si apre", v.editor is None and v.focus_field is None)
+        v.setFocus()
+        QTest.keyClick(v, Qt.Key.Key_Tab)
+        pump(0.05)
+        check("#71 3. Tab: nessun campo raggiunto", v.editor is None and v.focus_field is None)
+        QTest.keyClick(v, Qt.Key.Key_Space)
+        pump(0.05)
+        check("#71 3. nessun valore cambiato", not w.forms.changed() and not w.modified)
+
+    w.act_view_right.trigger()
+    pump(0.05)
+    rotated = v.rotation == 90
+    w.act_view_left.trigger()
+    pump(0.05)
+    check("#71 3. Ruota vista funziona", rotated and v.rotation == 0)
+
+    copy = work / "copia_identica.pdf"
+    save_answers[:] = [str(copy)]
+    saved = w.save_as()
+    check("#71 3. Salva con nome: copia identica byte per byte",
+          saved and copy.exists() and copy.read_bytes() == foreign.read_bytes() and no_leftovers(work),
+          str(save_asked) + str(errors))
+    check("#71 3. Salva con nome propone <nome>_copia.pdf", save_asked and Path(save_asked[-1]).name == "certificato_altro_copia.pdf",
+          str(save_asked))
+    check("#71 3. il documento aperto resta quello, ancora bloccato", w._path == str(foreign) and w._locked)
+    check("#71 3. sigillo della copia integro",
+          getattr(sealing.seal_status(str(copy), None, folder), "state", None) == sealing.INTACT)
+
+    w.open_file(str(plain))
+    pump(0.2)
+    back = [n for n, a in disabled.items() if not a.isEnabled() and a is not w.act_save]
+    check("#71 3. aprendo un PDF normale tutto torna attivo",
+          not back and w.sign_button.isEnabled() and w.draw_button.isEnabled() and not w._locked and not v.read_only
+          and w.seal_bar.isHidden(), str(back))
+    check("#71 3. tooltip di nuovo quelli di prima",
+          w.act_text.toolTip() == "Aggiungi testo (Ctrl+T)"
+          and w.act_organize.toolTip() == QAction(w.act_organize.text()).toolTip()
+          and w.sign_button.toolTip() == "Metti una firma sul documento", w.act_organize.toolTip())
+    main_window.PageOrganizer = real_organizer
+    check("#71 3. chiudendo il documento la sola lettura si azzera",
+          (open_locked(mine), w.close_document(), not w._locked and not v.read_only and w.seal_bar.isHidden())[-1])
+
+    # --- 4. Non bloccante ---
+    locking.CHECK_DELAY = 3.0
+    t = time.perf_counter()
+    w.open_file(str(mine))
+    opened = time.perf_counter() - t
+    shown = False
+    while time.perf_counter() - t < 2.5 and not shown:
+        app.processEvents(); time.sleep(0.01)
+        shown = 0 in v._cache
+    check("#71 4. con la verifica rallentata la finestra mostra subito le pagine e «Controllo del sigillo…»",
+          shown and opened < 1.0 and w._seal_check is not None and bar() == sealing.CHECKING_TEXT,
+          f"apertura {opened:.2f} s, pagina {shown}, {bar()}")
+    w.open_file(str(plain))
+    pump(4.0)
+    check("#71 4. aperto un altro file prima della fine: il risultato vecchio non compare",
+          bar() is None and not w._locked and w._seal_check is None, str(bar()))
+    w.open_file(str(mine))
+    pump(0.5)
+    w.open_file(str(rewritten))  # un altro PDF bloccato: vale solo il suo risultato
+    wait_seal()
+    pump(0.5)
+    check("#71 4. due PDF bloccati di seguito: resta il risultato del secondo",
+          bar() == sealing.INVALID_TEXT, str(bar()))
+    locking.CHECK_DELAY = 0.0
+
+    # --- 5. Firma di approvazione normale: niente barra, modificabile ---
+    w.open_file(str(signed))
+    pump(0.3)
+    check("#71 5. firma di approvazione: niente barra né verifica",
+          w.seal_bar.isHidden() and w._seal_check is None and not w._locked, str(bar()))
+    check("#71 5. resta modificabile come oggi", w.act_text.isEnabled() and w.act_draw.isEnabled() and not v.read_only)
+    check("#71 5. seal_status: nessuna certificazione = None",
+          sealing.seal_status(str(signed)) is None and sealing.seal_status(str(PDFS / "semplice.pdf")) is None)
+
+    # --- 6. Apertura di un PDF senza firme: solo il controllo rapido, nessun processo ---
+    w.open_file(str(plain))
+    pump(0.1)
+    check("#71 6. PDF senza firme: nessun processo di verifica", w._seal_check is None and not w._locked)
+    doc = pymupdf.open(PDFS / "semplice.pdf")
+    t = time.perf_counter()
+    for _ in range(100):
+        sealing.docmdp_level(doc)
+    quick = (time.perf_counter() - t) / 100
+    doc.close()
+    check("#71 6. controllo rapido sotto 1 ms", quick < 0.001, f"{quick * 1e6:.0f} µs")
+    check("#71 6. open_document riconosce i PDF bloccati",
+          open_document(str(mine)).certified and open_document(str(changed)).certified
+          and not open_document(str(signed)).certified and not open_document(str(plain)).certified)
 
     temps_after = set(glob.glob(os.path.join(tempfile.gettempdir(), "piedf-blocco-*")))
     check("temporanei delle modifiche cancellati", temps_after <= temps_before, str(temps_after - temps_before))

@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -51,14 +52,17 @@ from piedf.annotations import (
 from piedf.document import OpenError, PasswordRequired, PdfDocument, open_document
 from piedf.external import open_external
 from piedf.forms import FormValues
-from piedf.locking import LockDialog, SealJob, ask_seal_name
+from piedf.locking import LockDialog, SealCheckJob, SealJob, ask_seal_name
 from piedf.page_ops import MAIN, PageRef
 from piedf.page_organizer import PageJob, PageOrganizer, open_with_password, run_with_progress
 from piedf.placements import Placements
 from piedf.positions import Positions
 from piedf.printing import NO_PRINT_MESSAGE, PrintJob, PrintOptions, PrintOptionsDialog, can_print, print_source, remove_quietly, selected_pages
 from piedf.renderer import Renderer
-from piedf.sealing import ALREADY_SIGNED, FOREIGN, TIMESTAMP_FAILED, TSA_URL, default_name, has_signatures, identity_state, seal_dir
+from piedf.sealing import (
+    ALREADY_SIGNED, CHECKING_TEXT, FOREIGN, INTACT, LOCKED_TIP, TIMESTAMP_FAILED, TMP_SUFFIX, TSA_URL, default_name, describe,
+    has_signatures, identity_state, seal_dir,
+)
 from piedf.search_bar import SearchBar
 from piedf.sidebar import PAGES_TAB, TOC_TAB, Sidebar
 from piedf.signature_dialog import SignatureDialog
@@ -86,6 +90,8 @@ XFA_MESSAGE = "Questo modulo usa una tecnologia (XFA) che PieDF non supporta: i 
 MAX_HISTORY = 50
 SIDEBAR_WIDTH = 220  # px logici, larghezza del pannello laterale la prima volta
 SAVE_FIRST = "Salva o scarta le modifiche prima di organizzare le pagine."
+SEAL_BAR_STYLE = "#seal_bar { background: #e8f0fe; border-bottom: 1px solid #c6d4f0; }"
+SEAL_BAR_ALERT = "#seal_bar { background: #fde7e7; border-bottom: 1px solid #f0b4b4; } #seal_bar QLabel { color: #b3261e; }"
 
 
 class ThumbnailItem(QLabel):
@@ -129,6 +135,9 @@ class MainWindow(QMainWindow):
         self._temps: list[str] = []  # temporanei delle pagine, da cancellare quando non servono più
         self._page_job: PageJob | None = None
         self._seal_job: SealJob | None = None
+        # Documento con una firma di certificazione DocMDP 1 (#71): si legge soltanto.
+        self._locked = False
+        self._seal_check: SealCheckJob | None = None
         self._gen = 0
         # Cronologia dei link interni: posizioni (pagina, y in punti) come scroll_position.
         self._back: list[tuple[int, float]] = []
@@ -166,10 +175,12 @@ class MainWindow(QMainWindow):
         self.search_bar.show_hit.connect(self._show_search_hit)
         self.search_bar.toggled.connect(self._place_text_bar)
         self._build_form_bar()
+        self._build_seal_bar()
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        layout.addWidget(self.seal_bar)
         layout.addWidget(self.form_bar)
         layout.addWidget(self.view)
         self.setCentralWidget(central)
@@ -282,6 +293,7 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
+        self._file_menu = file_menu
         file_menu.addAction(self.act_open)
         self._recent_menu = file_menu.addMenu("File &recenti")
         self._recent_menu.aboutToShow.connect(self._fill_recent_menu)
@@ -326,6 +338,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.act_forward)
 
         pages_menu = self.menuBar().addMenu("&Pagine")
+        self._pages_menu = pages_menu
         pages_menu.addAction(self.act_organize)
         pages_menu.addAction(self.act_merge)
         pages_menu.addSeparator()
@@ -421,6 +434,19 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.draw_button)
 
         self._doc_widgets = [self._page_box, self._zoom_box, self.sign_button, self.draw_button]
+        # Disattivati con il documento bloccato (#71), con il loro tooltip da rimettere dopo.
+        self._lockable = [
+            self.act_save, self.act_lock, self.act_text, self.act_date, self.act_draw, *self.draw_actions.values(),
+            self.act_organize, self.act_merge, self.act_rotate_left, self.act_rotate_right,
+            self._insert_sign_menu.menuAction(), self.sign_button, self.draw_button,
+        ]
+        # Solo i tooltip impostati apposta: "" rimette quello predefinito (il testo dell'azione).
+        self._tips = {
+            item: item.toolTip() if isinstance(item, QToolButton) or item.toolTip() != QAction(item.text()).toolTip() else ""
+            for item in self._lockable
+        }
+        for menu in (self._file_menu, self._pages_menu, self._tools_menu, self.draw_menu):
+            menu.setToolTipsVisible(True)  # mostra solo i tooltip impostati: «Il documento è bloccato»
 
     def _build_draw_menu(self) -> None:
         """Strumenti di disegno, colori e spessori: scegliere un colore accende il suo strumento."""
@@ -637,8 +663,62 @@ class MainWindow(QMainWindow):
         self._settings.setValue("highlight_fields", on)
         self.view.set_highlight(on)
 
+    def _build_seal_bar(self) -> None:
+        """Barra sopra la vista con lo stato del sigillo, solo per i documenti bloccati (#71)."""
+        self.seal_bar = QFrame()
+        self.seal_bar.setObjectName("seal_bar")
+        self.seal_bar.setStyleSheet(SEAL_BAR_STYLE)
+        layout = QHBoxLayout(self.seal_bar)
+        layout.setContentsMargins(8, 3, 8, 3)
+        self.seal_label = QLabel()
+        self.seal_label.setWordWrap(True)
+        self.seal_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.seal_label, 1)
+        self.seal_bar.hide()
+
+    def _show_seal(self, text: str | None, alert: bool = False) -> None:
+        if text is None:
+            self.seal_bar.hide()
+            return
+        self.seal_label.setText(text)
+        self.seal_bar.setStyleSheet(SEAL_BAR_ALERT if alert else SEAL_BAR_STYLE)
+        self.seal_bar.show()
+
+    def _check_seal(self, doc: PdfDocument | None) -> None:
+        """Documento bloccato: sola lettura subito (controllo rapido di `open_document`), poi la
+        verifica del sigillo in un processo a parte; il risultato di un documento non più aperto
+        si scarta."""
+        if self._seal_check is not None:
+            self._seal_check.cancel()
+            self._seal_check.deleteLater()
+            self._seal_check = None
+        self._locked = doc is not None and doc.certified
+        self.view.set_read_only(self._locked)
+        if not self._locked:
+            self._show_seal(None)
+            return
+        self._show_seal(CHECKING_TEXT)
+        job = SealCheckJob(self._path, self._password, seal_dir(paths.data_dir()), self)
+        self._seal_check = job
+        gen = self._gen
+
+        def done(status) -> None:
+            if job is not self._seal_check or gen != self._gen:
+                return
+            self._seal_check = None
+            job.deleteLater()
+            if status is None:
+                self._show_seal(None)
+            else:
+                self._show_seal(describe(status), alert=status.state != INTACT)
+
+        job.finished.connect(done)
+        job.start()
+
     def _update_form_bar(self, doc: PdfDocument | None) -> None:
-        if doc is not None and doc.xfa:
+        if doc is not None and doc.certified:
+            self.form_bar.hide()  # bloccato: i campi non si compilano
+        elif doc is not None and doc.xfa:
             self.form_label.setText(XFA_MESSAGE)
             self.highlight_button.hide()
             self.form_bar.show()
@@ -657,6 +737,12 @@ class MainWindow(QMainWindow):
         self._insert_sign_menu.menuAction().setEnabled(has_doc)
         self.act_back.setEnabled(has_doc and bool(self._back))
         self.act_forward.setEnabled(has_doc and bool(self._forward))
+        self.act_merge.setEnabled(True)
+        # Documento bloccato: si legge soltanto (Salva con nome scrive una copia identica).
+        for item in self._lockable:
+            if self._locked:
+                item.setEnabled(False)
+            item.setToolTip(LOCKED_TIP if self._locked else self._tips[item])
         # La vista si ruota solo senza firme, campi, caselle o tratti da salvare e senza strumenti
         # attivi: con la vista ruotata il documento si legge soltanto. Raddrizzarla si può sempre.
         tool = self.view.placing or self.view.text_tool or self.view.draw_tool is not None
@@ -746,6 +832,7 @@ class MainWindow(QMainWindow):
         self.forms.set_fields(doc.fields)
         self.annotations.set_items(doc.annotations)
         self._update_form_bar(doc)
+        self._check_seal(doc)
         self.search_bar.reset(self._gen)
         self._page_box.setRange(1, len(doc.page_sizes))
         self._page_total.setText(f" / {len(doc.page_sizes)} ")
@@ -771,6 +858,7 @@ class MainWindow(QMainWindow):
         self.forms.set_fields([])
         self.annotations.set_items([])
         self._update_form_bar(None)
+        self._check_seal(None)
         self.search_bar.reset(self._gen)
         self._page_box.setRange(0, 0)
         self._page_total.setText(" / 0 ")
@@ -933,7 +1021,7 @@ class MainWindow(QMainWindow):
 
     def save(self) -> bool:
         """Il primo Salva di un documento chiede il nome, per non sovrascrivere l'originale per sbaglio."""
-        if self._path is None:
+        if self._path is None or self._locked:
             return False
         if self._save_path is None:
             return self.save_as()
@@ -942,6 +1030,8 @@ class MainWindow(QMainWindow):
     def save_as(self) -> bool:
         if self._path is None:
             return False
+        if self._locked:
+            return self._save_copy()
         if self._save_path is not None:
             proposed = self._save_path
         else:
@@ -1002,6 +1092,35 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Salvato in {Path(dest).name}", 10000)
         return True
 
+    def _save_copy(self) -> bool:
+        """Salva con nome di un documento bloccato: copia del file byte per byte, sigillo intatto
+        (niente `save_with_signatures`). Il documento aperto resta quello."""
+        src = Path(self._path)
+        proposed = str(src.with_name(f"{src.stem}_copia.pdf"))
+        dest, _ = QFileDialog.getSaveFileName(self, "Salva una copia del PDF bloccato", proposed, "Documenti PDF (*.pdf)")
+        if not dest:
+            return False
+        if not Path(dest).suffix:
+            dest += ".pdf"
+        dest = os.path.abspath(dest)
+        if os.path.normcase(dest) == os.path.normcase(str(src)):
+            return True  # è già lui
+        tmp = dest + TMP_SUFFIX
+        try:
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, dest)
+        except OSError as e:
+            remove_quietly(tmp)
+            QMessageBox.critical(
+                self, "Salvataggio non riuscito",
+                f"Impossibile scrivere «{Path(dest).name}».\n\n"
+                "La cartella potrebbe non essere scrivibile oppure il file è aperto in un altro programma.\n\n"
+                f"Dettagli: {e}",
+            )
+            return False
+        self.statusBar().showMessage(f"Copia salvata in {Path(dest).name}", 10000)
+        return True
+
     def _reopen_saved(self, dest: str, password: str | None) -> bool:
         """Apre il file appena scritto alla stessa pagina, zoom e scorrimento."""
         page, zoom, fit = self.view.current_page, self.view.zoom, self.view.fit_mode
@@ -1032,7 +1151,7 @@ class MainWindow(QMainWindow):
     def save_and_lock(self) -> bool:
         """Conferma, nome del sigillo al primo uso, file di destinazione; poi il sigillo in un
         processo a parte (`_lock_to`). False se non si parte (annullato o rifiutato)."""
-        if self._path is None or self._seal_job is not None:
+        if self._path is None or self._seal_job is not None or self._locked:
             return False
         self.view.commit_editor()
         self.view.cancel_copy()  # il processo della copia tiene aperto il file
@@ -1279,7 +1398,7 @@ class MainWindow(QMainWindow):
 
     def organize_pages(self, files: list[tuple[str, PdfDocument]] = ()) -> None:
         """Apre "Organizza pagine"; i `files` (Unisci PDF) si aggiungono in fondo."""
-        if self._page_job is not None or not self._ensure_saved():
+        if self._page_job is not None or self._locked or not self._ensure_saved():
             return
         self.view.cancel_placing()
         dialog = PageOrganizer(self._path, self._password, self.view.page_sizes, self._shown_path(), self)
@@ -1300,7 +1419,7 @@ class MainWindow(QMainWindow):
             if not self.open_file(paths[0]):
                 return
             paths = paths[1:]
-        elif not self._ensure_saved():
+        elif self._locked or not self._ensure_saved():
             return
         files = []
         for path in paths:
@@ -1311,7 +1430,7 @@ class MainWindow(QMainWindow):
             self.organize_pages(files)
 
     def rotate_current(self, delta: int) -> None:
-        if self._page_job is not None or not self._ensure_saved():
+        if self._page_job is not None or self._locked or not self._ensure_saved():
             return
         current = self.view.current_page
         refs = [PageRef(MAIN, i, size, delta % 360 if i == current else 0) for i, size in enumerate(self.view.page_sizes)]
@@ -1609,6 +1728,8 @@ class MainWindow(QMainWindow):
             self._page_job.cancel()
         if self._seal_job is not None:
             self._seal_job.cancel()
+        if self._seal_check is not None:
+            self._seal_check.cancel()
         self.view.cancel_copy()
         self._settings.sync()  # all'uscita Python può non distruggere QSettings
         self._renderer.shutdown()

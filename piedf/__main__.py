@@ -13,6 +13,10 @@ if __name__ == "__main__":
         from piedf.sealing import cli
 
         sys.exit(cli(sys.argv[2:]))
+    if sys.argv[1:2] == ["--piedf-verifica"]:  # solo per tests/check_exe.py, senza finestra
+        from piedf.sealing import verify_cli
+
+        sys.exit(verify_cli(sys.argv[2:]))
 
     from piedf.app import main
 
