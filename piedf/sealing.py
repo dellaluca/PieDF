@@ -374,12 +374,13 @@ def _timestamper(url: str):
 
 
 def seal(src: str, password: str | None, dest: str, folder: Path, tsa_url: str | None = None,
-         name: str | None = None) -> None:
+         name: str | None = None, cert_id: str | None = None) -> None:
     """Appiattisce `src` e lo scrive in `dest` (anche lo stesso file) con il sigillo.
 
     `tsa_url` = marca temporale (PAdES B-T), None = senza (B-B). `name` = crea prima un
-    certificato personale nuovo con questo nome. Solleva `SealError` (o le sue sottoclassi):
-    in quel caso `dest` non è stato toccato.
+    certificato personale nuovo con questo nome. `cert_id` = impronta del certificato con cui
+    firmare (#75, `certificates`), None = il sigillo personale. Solleva `SealError` (o le sue
+    sottoclassi): in quel caso `dest` non è stato toccato.
     """
     _stub_aiohttp()
     from pyhanko.pdf_utils.crypt import AuthStatus
@@ -389,7 +390,12 @@ def seal(src: str, password: str | None, dest: str, folder: Path, tsa_url: str |
 
     if name is not None:
         create_identity(folder, name)
-    cert, key = load_identity(folder)
+    if cert_id is None:
+        cert, key = load_identity(folder)
+        chain = []
+    else:
+        from piedf import certificates
+        cert, key, chain = certificates.load_signer(folder, cert_id)
 
     try:
         doc = pymupdf.open(src)
@@ -427,7 +433,7 @@ def seal(src: str, password: str | None, dest: str, folder: Path, tsa_url: str |
         raise SealError(f"{ENCRYPTION_UNSUPPORTED}\n\nDettagli: {e}") from e
 
     signer = signers.SimpleSigner(
-        signing_cert=cert, signing_key=key, cert_registry=SimpleCertificateStore.from_certs([cert]),
+        signing_cert=cert, signing_key=key, cert_registry=SimpleCertificateStore.from_certs([cert, *chain]),
     )
     meta = signers.PdfSignatureMetadata(
         field_name=FIELD_NAME, certify=True, docmdp_permissions=fields.MDPPerm.NO_CHANGES,
@@ -478,11 +484,11 @@ def cli(args: list[str]) -> int:
         return 1
 
 
-def run(src, password, dest, folder, tsa_url, name, results) -> None:
+def run(src, password, dest, folder, tsa_url, name, cert_id, results) -> None:
     """Processo del sigillo: ("done",) oppure ("error", tipo, messaggio) con tipo
     "signed" / "foreign" / "timestamp" / "error"."""
     try:
-        seal(src, password, dest, Path(folder), tsa_url, name)
+        seal(src, password, dest, Path(folder), tsa_url, name, cert_id)
         results.put(("done",))
     except AlreadySigned as e:
         results.put(("error", "signed", str(e)))

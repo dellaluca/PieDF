@@ -195,7 +195,8 @@ def main():
     w = MainWindow()
     menus = {a.text(): [x.text() for x in a.menu().actions()] for a in w.menuBar().actions()}
     check("menu Strumenti", menus.get("&Strumenti") == [
-        "&Inserisci firma", "", "Crea &firma…", "Crea &iniziali…", "", "&Gestisci firme…", "", "Aggiungi &testo",
+        "&Inserisci firma", "", "Crea &firma…", "Crea &iniziali…", "", "&Gestisci firme…", "&Certificati…", "",
+        "Aggiungi &testo",
         "Aggiungi &data", "", "&Disegna", "Strumenti di &disegno",
     ], str(menus.get("&Strumenti")))
     w.close()

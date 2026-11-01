@@ -17,6 +17,7 @@ Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa
 - **Scrivere e disegnare**: aggiungi caselle di testo (con i font installati sul PC: il PDF si vede uguale anche dove quel font non c'è), la data, tratti a mano libera ed evidenziazioni, modificabili anche dopo il salvataggio.
 - **Organizzare le pagine**: riordina, ruota, elimina pagine, inserisci pagine da altri PDF ed estraine una parte in un file nuovo.
 - **Salvare e bloccare**: sigilla il PDF firmato con un sigillo digitale personale, così ogni modifica fatta dopo con un altro programma viene segnalata da chi controlla le firme. Su richiesta aggiunge una data certa (marca temporale).
+- **Certificati**: da Strumenti › Certificati… fai una copia di sicurezza del sigillo personale (protetta da una password) per portarlo su un altro PC, oppure importa un certificato .p12/.pfx (per esempio quello della tua azienda) e firma con quello. Se ne hai più di uno, scegli con quale bloccare il PDF.
 - **Stampare** quello che vedi, firme comprese.
 - **Informazioni**: dal menu Aiuto vedi la versione, la licenza e il link al codice sorgente.
 
@@ -68,7 +69,7 @@ PieDF non invia dati in rete. I soli collegamenti verso l'esterno sono:
 - l'apertura di un link contenuto in un PDF (nel browser o nel programma di posta), solo dopo il clic e la conferma dell'indirizzo (lo stesso vale per i link della finestra Informazioni);
 - la **data certa** di «Salva e blocca», solo se spunti «Aggiungi data certa»: PieDF chiede una marca temporale a un servizio pubblico e gratuito di marche temporali inviando solo un'impronta del documento, mai il documento o il tuo nome. La casella è spenta finché non la scegli tu.
 
-Il sigillo personale di «Salva e blocca» si crea sul tuo PC e la sua chiave resta nella cartella dei dati, protetta con il tuo utente di Windows.
+Il sigillo personale di «Salva e blocca» si crea sul tuo PC e la sua chiave resta nella cartella dei dati, protetta con il tuo utente di Windows. Lo stesso vale per i certificati che importi: il file .p12/.pfx e la sua password non vengono conservati.
 
 *Privacy policy*: this program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
 
