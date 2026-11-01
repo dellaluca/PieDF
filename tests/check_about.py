@@ -78,6 +78,8 @@ def main():
     check("PyMuPDF con versione", f"PyMuPDF {pymupdf.VersionBind}" in text)
     check("PySide6 con versione", f"(PySide6) {PySide6.__version__}" in text)
     check("Python con versione", f"Python {platform.python_version()}" in text)
+    from pyhanko.version import __version__ as pyhanko_version
+    check("pyHanko con versione e licenza (#70)", f"pyHanko {pyhanko_version}: MIT" in text)
     check("testo selezionabile", bool(dlg.text.textInteractionFlags() & dlg.text.textInteractionFlags().TextSelectableByMouse))
     check("logo", dlg.findChildren(type(dlg.text))[0].pixmap() is not None and not dlg.findChildren(type(dlg.text))[0].pixmap().isNull())
     check("«Mostra la licenza» attivo (LICENSE nel repo)", dlg.show_license.isEnabled())

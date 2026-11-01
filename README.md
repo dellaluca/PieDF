@@ -6,16 +6,17 @@ Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa
 
 ![PieDF con un documento aperto e il pannello delle pagine](docs/img/lettura.png)
 
-> **English** — PieDF is a lightweight, portable PDF reader for Windows 10/11. It opens, searches and prints PDFs, fills in PDF forms, lets you sign documents with a drawn, typed or image signature, adds editable text boxes and freehand drawings, and reorganizes pages (reorder, rotate, insert, extract, delete). No installer: unzip and run `PieDF.exe`; to uninstall, delete the folder. Free software under the [AGPL-3.0](LICENSE). The ready-to-use build will be available as a paid download; the source code is free and you can build it yourself ([docs/sviluppo.md](docs/sviluppo.md)).
+> **English** — PieDF is a lightweight, portable PDF reader for Windows 10/11. It opens, searches and prints PDFs, fills in PDF forms, lets you sign documents with a drawn, typed or image signature, adds editable text boxes and freehand drawings, reorganizes pages (reorder, rotate, insert, extract, delete) and can seal a signed PDF with a personal digital seal so that later changes are detected. No installer: unzip and run `PieDF.exe`; to uninstall, delete the folder. Free software under the [AGPL-3.0](LICENSE). The ready-to-use build will be available as a paid download; the source code is free and you can build it yourself ([docs/sviluppo.md](docs/sviluppo.md)).
 
 ## Cosa fa
 
 - **Leggere**: scorrimento continuo, zoom, pannello laterale con le miniature delle pagine e l'indice del documento, link cliccabili. Riapre ogni file alla pagina dove l'avevi lasciato.
 - **Cercare e copiare**: trova una parola in tutto il documento e seleziona il testo per copiarlo.
-- **Firmare**: crea la tua firma (o le iniziali) disegnandola, scrivendola in corsivo o da una foto, e mettila dove serve. Le firme restano salvate per le volte successive.
+- **Firmare**: crea la tua firma (o le iniziali) disegnandola, scrivendola in corsivo o da una foto, e mettila dove serve. Le firme restano salvate per le volte successive, e da «Le mie firme» puoi importare quelle di un'altra cartella di PieDF.
 - **Compilare i moduli**: caselle di testo, spunte e scelte dei moduli PDF.
 - **Scrivere e disegnare**: aggiungi caselle di testo (con i font installati sul PC: il PDF si vede uguale anche dove quel font non c'è), la data, tratti a mano libera ed evidenziazioni, modificabili anche dopo il salvataggio.
 - **Organizzare le pagine**: riordina, ruota, elimina pagine, inserisci pagine da altri PDF ed estraine una parte in un file nuovo.
+- **Salvare e bloccare**: sigilla il PDF firmato con un sigillo digitale personale, così ogni modifica fatta dopo con un altro programma viene segnalata da chi controlla le firme. Su richiesta aggiunge una data certa (marca temporale).
 - **Stampare** quello che vedi, firme comprese.
 - **Informazioni**: dal menu Aiuto vedi la versione, la licenza e il link al codice sorgente.
 
@@ -29,7 +30,7 @@ Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa
 2. Avvia `PieDF\PieDF.exe`. Non c'è niente da installare.
 3. La prima volta Windows può mostrare «PC protetto da Windows»: PieDF non ha ancora una firma digitale, quindi Windows non ne conosce l'autore. Clicca **Ulteriori informazioni** → **Esegui comunque**. Il codice di ogni versione è pubblico in questo repository.
 
-Le tue firme e le impostazioni stanno nella cartella `PieDF\data`: copiando la cartella di PieDF te le porti dietro. Se PieDF è in una cartella dove non può scrivere, le salva in `%APPDATA%\PieDF`.
+Le tue firme e le impostazioni stanno nella cartella `PieDF\data`: copiando la cartella di PieDF te le porti dietro. Se PieDF è in una cartella dove non può scrivere, le salva in `%APPDATA%\PieDF`. Una versione nuova, al primo avvio, propone di copiare firme e impostazioni dalla precedente.
 
 **Aprire i PDF con PieDF**: tasto destro su un PDF → *Apri con* → *Scegli un'altra app* → *Cerca un'altra app in questo PC* e scegli `PieDF.exe`. Spuntando *Usa sempre quest'app* PieDF diventa il lettore predefinito. Puoi anche trascinare un PDF sull'icona di PieDF o nella finestra.
 
@@ -62,7 +63,12 @@ PieDF è software libero e lo resta: il codice è tutto qui, con la licenza [AGP
 
 ## Privacy
 
-PieDF non invia dati in rete. L'unico collegamento verso l'esterno è l'apertura di un link contenuto in un PDF (nel browser o nel programma di posta), solo dopo il clic e la conferma dell'indirizzo (lo stesso vale per i link della finestra Informazioni).
+PieDF non invia dati in rete. I soli collegamenti verso l'esterno sono:
+
+- l'apertura di un link contenuto in un PDF (nel browser o nel programma di posta), solo dopo il clic e la conferma dell'indirizzo (lo stesso vale per i link della finestra Informazioni);
+- la **data certa** di «Salva e blocca», solo se spunti «Aggiungi data certa»: PieDF chiede una marca temporale a un servizio pubblico e gratuito di marche temporali inviando solo un'impronta del documento, mai il documento o il tuo nome. La casella è spenta finché non la scegli tu.
+
+Il sigillo personale di «Salva e blocca» si crea sul tuo PC e la sua chiave resta nella cartella dei dati, protetta con il tuo utente di Windows.
 
 *Privacy policy*: this program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
 
