@@ -43,6 +43,8 @@ def main():
             png(data / "firme" / f"firma_{i}.png", shade)
         (data / "settings.ini").write_text("[print]\nfit=false\n", encoding="utf-8")
         (data / "posizioni.json").write_text("{}", encoding="utf-8")
+        (data / "sigillo").mkdir()
+        (data / "sigillo" / "chiave.bin").write_bytes(b"finta")
         if mtime is not None:
             for f in data.rglob("*"):
                 if f.is_file():
@@ -63,7 +65,7 @@ def main():
     check("la propria cartella è esclusa", data_import.find_previous(new_exe, old) is None)
     summary = data_import.summarize(old)
     check("riepilogo", summary.signatures == 3 and summary.settings and summary.positions, summary.describe())
-    check("testo del riepilogo", summary.describe() == "3 firme, impostazioni e posizioni di lettura")
+    check("testo del riepilogo", summary.describe() == "3 firme, impostazioni, posizioni di lettura e sigillo")
 
     paths.base_dir = lambda: new_exe
     paths.is_frozen = lambda: True
@@ -81,6 +83,7 @@ def main():
     check("firme copiate", len(list((new_data / "firme").glob("*.png"))) == 3)
     check("settings.ini copiato", (new_data / "settings.ini").read_text(encoding="utf-8") == "[print]\nfit=false\n")
     check("posizioni.json copiato", (new_data / "posizioni.json").is_file())
+    check("sigillo/ copiata", (new_data / "sigillo" / "chiave.bin").read_bytes() == b"finta")
     check("firme nel menu", len(window.signatures.list()) == 3)
     check("preferenze rilette", window._settings.value("print/fit", True, type=bool) is False)
     check("originali invariati", snapshot(old) == before)

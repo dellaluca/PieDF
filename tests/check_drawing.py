@@ -223,10 +223,10 @@ def main():
         print(f"\n{sum(results)}/{len(results)} ok", flush=True)
         return 0 if all(results) else 1
 
-    check("1. Disegna in toolbar e menu Firma, Ctrl+D",
+    check("1. Disegna in toolbar e menu Strumenti, Ctrl+D",
           w.act_draw.isEnabled() and w.draw_button.isEnabled() and w.act_draw.shortcut().toString() == "Ctrl+D"
           and w.draw_button.defaultAction() is w.act_draw and w.draw_button.menu() is w.draw_menu
-          and any(a is w.act_draw for m in w.menuBar().actions() if m.text() == "F&irma" for a in m.menu().actions()))
+          and any(a is w.act_draw for m in w.menuBar().actions() if m.text() == "&Strumenti" for a in m.menu().actions()))
     labels = [a.text() for a in w.draw_menu.actions()]
     check("1. menu: Penna, Evidenziatore, Gomma, colori e spessori",
           labels[:3] == ["Penna", "Evidenziatore", "Gomma"]

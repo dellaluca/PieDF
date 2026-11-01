@@ -198,7 +198,7 @@ def main():
     # --- 1. Testo su semplice.pdf, salvato come FreeText di PieDF ---
     src = copy("semplice.pdf")
     check("1. apertura semplice.pdf", w.open_file(str(src)))
-    check("1. Testo e Data in toolbar e menu Firma, Ctrl+T",
+    check("1. Testo e Data in toolbar e menu Strumenti, Ctrl+T",
           w.act_text.isEnabled() and w.act_date.isEnabled() and w.act_text.shortcut().toString() == "Ctrl+T"
           and w.act_text.iconText() == "T" and w.act_date.iconText() == "Data")
     show(0, 300)

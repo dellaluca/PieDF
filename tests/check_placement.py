@@ -90,21 +90,40 @@ def main():
     menus = [a.text() for a in w.menuBar().actions()]
     check("menu Modifica tra File e Visualizza", menus[:3] == ["&File", "&Modifica", "&Visualizza"], str(menus))
     w.signatures.delete(sig)
-    w._fill_sign_menu()
+    w._fill_sign_menu(w._sign_menu)
     labels = [a.text() for a in w._sign_menu.actions()]
     check("menu senza firme: solo Nuova…", labels == ["Nuova firma…", "Nuove iniziali…"], str(labels))
     sig = make(Kind.SIGNATURE, 600, 200)
     ini = make(Kind.INITIALS, 200, 200)
-    w._fill_sign_menu()
+    w._fill_sign_menu(w._sign_menu)
     acts = w._sign_menu.actions()
     labels = ["<firma>" if isinstance(a, QWidgetAction) else a.text() or "|" for a in acts]
     check("menu con firme", labels == ["<firma>", "|", "<firma>", "|", "Nuova firma…", "Nuove iniziali…", "Gestisci firme…"], str(labels))
     check("menu: tipo nel tooltip", [acts[0].toolTip(), acts[2].toolTip()] == ["Firma", "Iniziali"])
 
+    # --- Menu Strumenti › Inserisci firma (#58) ---
+    check("barra dei menu: Strumenti al posto di Firma",
+          menus == ["&File", "&Modifica", "&Visualizza", "&Pagine", "&Strumenti"], str(menus))
+    sub_menu = w._insert_sign_menu
+    check("Strumenti: Inserisci firma in cima, disabilitato senza documento",
+          w._tools_menu.actions()[0].menu() is sub_menu and not sub_menu.menuAction().isEnabled())
+    w._fill_sign_menu(sub_menu)
+    check("Inserisci firma elenca le stesse voci del pulsante",
+          [(type(a).__name__, a.text(), a.toolTip()) for a in sub_menu.actions()]
+          == [(type(a).__name__, a.text(), a.toolTip()) for a in acts])
+
     # --- 1. Clic al centro di semplice.pdf al 100% ---
     w.open_file(str(PDFS / "semplice.pdf"))
     v.set_zoom(1.0); pump()
     check("Firma ▾ abilitato con documento", w.sign_button.isEnabled())
+    check("Inserisci firma abilitato con documento", sub_menu.menuAction().isEnabled())
+    w._fill_sign_menu(sub_menu)
+    sub_menu.actions()[0].trigger()  # la prima firma, dal menu Strumenti
+    _, c0 = center_of(0)
+    click(c0)
+    check("Strumenti › Inserisci firma: un clic piazza la firma", len(model.items) == 1 and not v.placing)
+    model.undo_stack.undo()
+    check("(annullata, si riparte)", len(model.items) == 0)
     acts[0].trigger()  # la prima firma del menu
     check("modalità posizionamento", v.placing and vp.cursor().shape() == Qt.CursorShape.CrossCursor
           and w.statusBar().currentMessage() == PLACING_HINT, w.statusBar().currentMessage())

@@ -123,6 +123,8 @@ def main():
     check("niente tests/ nell'exe", not list(EXE.parent.rglob("check_*.py")))
     check("icona inclusa", (EXE.parent / "_internal" / "piedf" / "assets" / "piedf.ico").exists())
 
+    check("LICENSE inclusa", (EXE.parent / "_internal" / "LICENSE").exists())
+
     # --- 2. Avvio con un file: finestra, GUI + render, recenti in data/ ---
     data = EXE.parent / "data"
     shutil.rmtree(data, ignore_errors=True)

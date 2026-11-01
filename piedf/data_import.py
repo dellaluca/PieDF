@@ -16,6 +16,7 @@ MAX_SECONDS = 0.2
 EXE_NAME = "PieDF.exe"
 SETTINGS = "settings.ini"
 POSITIONS = "posizioni.json"
+SEAL = "sigillo"  # cartella di "Salva e blocca" (#70): chiave DPAPI, valida sullo stesso utente Windows
 SKIP_KEY = "data_import/skip"
 
 
@@ -24,6 +25,7 @@ class DataSummary:
     signatures: int
     settings: bool
     positions: bool
+    seal: bool = False
 
     def describe(self) -> str:
         parts = []
@@ -33,6 +35,8 @@ class DataSummary:
             parts.append("impostazioni")
         if self.positions:
             parts.append("posizioni di lettura")
+        if self.seal:
+            parts.append("sigillo")
         if len(parts) > 1:
             return ", ".join(parts[:-1]) + " e " + parts[-1]
         return parts[0] if parts else "nessun dato"
@@ -55,7 +59,8 @@ def is_valid(data: Path) -> bool:
 
 def summarize(data: Path) -> DataSummary:
     try:
-        return DataSummary(len(_png_files(data)), (data / SETTINGS).is_file(), (data / POSITIONS).is_file())
+        return DataSummary(len(_png_files(data)), (data / SETTINGS).is_file(), (data / POSITIONS).is_file(),
+                           (data / SEAL).is_dir())
     except OSError:
         return DataSummary(len(_png_files(data)), False, False)
 
@@ -173,7 +178,7 @@ def exe_version(data: Path) -> str | None:
 
 
 def copy_data(src: Path, dst: Path) -> int:
-    """Copia firme, `settings.ini` e `posizioni.json` da `src` a `dst`. Restituisce le firme copiate."""
+    """Copia firme, `settings.ini`, `posizioni.json` e la cartella `sigillo/` da `src` a `dst`. Restituisce le firme copiate."""
     dst.mkdir(parents=True, exist_ok=True)
     copied = 0
     pngs = _png_files(src)
@@ -187,6 +192,8 @@ def copy_data(src: Path, dst: Path) -> int:
     for name in (SETTINGS, POSITIONS):
         if (src / name).is_file():
             shutil.copy2(src / name, dst / name)
+    if (src / SEAL).is_dir():  # per nome, intera; da sola non fa comparire l'offerta (`is_valid`)
+        shutil.copytree(src / SEAL, dst / SEAL, dirs_exist_ok=True)
     return copied
 
 

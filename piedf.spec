@@ -58,7 +58,7 @@ def keep(dest: str) -> bool:
 a = Analysis(
     [str(ROOT / "piedf" / "__main__.py")],
     pathex=[str(ROOT)],
-    datas=[(str(ROOT / "piedf" / "assets"), "piedf/assets")],
+    datas=[(str(ROOT / "piedf" / "assets"), "piedf/assets"), (str(ROOT / "LICENSE"), ".")],
     excludes=EXCLUDES,
     noarchive=False,
     optimize=0,

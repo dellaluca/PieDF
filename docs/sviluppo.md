@@ -27,7 +27,7 @@ Ogni PR li esegue su Windows nel workflow "Build".
 
 ## Costruire l'exe
 
-Ogni PR costruisce e prova l'exe nel controllo "Build" (lo zip è tra gli artifact della run). A mano:
+Ogni PR costruisce e prova l'exe nel controllo "Build" (senza allegare lo zip). A mano:
 
 ```bash
 pip install -r requirements.txt -r requirements-build.txt
@@ -42,6 +42,10 @@ Si distribuisce la versione a cartella (onedir) dentro lo zip: il onefile si sco
 
 Le immagini in `docs/img/` le genera `python tools/screenshots.py`, sui PDF di prova di `tests/make_test_pdfs.py`. Rigenerale quando l'interfaccia cambia in modo visibile.
 
+## Logo e icona
+
+Il logo è `piedf/assets/piedf.svg`. L'icona di finestra ed exe (`piedf/assets/piedf.ico`, 10 dimensioni da 16 a 256 px) si rigenera con `python tools/make_icon.py` ogni volta che il logo cambia.
+
 ## Pubblicare una versione
 
 1. Aggiorna `__version__` in `piedf/__init__.py` con una PR e uniscila.
@@ -50,4 +54,4 @@ Le immagini in `docs/img/` le genera `python tools/screenshots.py`, sui PDF di p
    git tag v0.1.0
    git push origin v0.1.0
    ```
-3. Il workflow "Release" costruisce l'exe su Windows, lo prova e crea la Release con lo zip allegato, anche con il nome fisso `PieDF-win64.zip` per il link diretto all'ultima versione (`https://github.com/dellaluca/PieDF/releases/latest/download/PieDF-win64.zip`). Se il tag non corrisponde a `__version__` si ferma con un errore.
+3. Il workflow "Release" costruisce l'exe su Windows, lo prova e crea la Release con le note e il codice sorgente. Lo zip compilato **non** è allegato alla Release (la versione pronta si vende a parte): finisce in una release in **bozza** `v<versione>-zip`, che vedono solo i collaboratori del repo (non pubblicarla). Niente artifact: in un repo pubblico li scarica chiunque. Se il tag non corrisponde a `__version__` si ferma con un errore.
