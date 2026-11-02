@@ -9,6 +9,7 @@ Se non è Windows o se manca dist/PieDF/PieDF.exe stampa SKIP ed esce 0.
 import csv
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -140,9 +141,12 @@ def main():
     check("la finestra si apre", win is not None, f"{secs:.1f} s" + (f" «{win[1]}»" if win else ""))
     if win:
         print(f"INFO onedir: avvio fino alla finestra {secs:.2f} s", flush=True)
-        check("titolo con il nome del file", "semplice.pdf" in win[1], win[1])
+        # La finestra si mostra (titolo «PieDF») prima di aprire il file: si aspetta il titolo.
+        title = wait_for(lambda: [w[1] for w in windows(pids()) if "semplice.pdf" in w[1]], WINDOW_TIMEOUT)
+        check("titolo con il nome del file", bool(title), str(title or [w[1] for w in windows(pids())]))
         time.sleep(2)  # il processo di render parte subito dopo la finestra
         running = pids()
+        # Anche: nessun processo di verifica del sigillo per un PDF senza firme (#71).
         check("esattamente 2 processi PieDF (GUI + render)", len(running) == 2, str(running))
         check("una sola finestra", len(windows(running)) == 1, str(windows(running)))
     ini = data / "settings.ini"
@@ -222,6 +226,32 @@ def main():
             check("sigillo: pyHanko lo valida", False, repr(e))
         blob = (seal_dir / "sigillo" / "chiave.dpapi").read_bytes()
         check("sigillo: chiave cifrata con DPAPI (nessuna chiave in chiaro)", b"PRIVATE KEY" not in blob and len(blob) > 100)
+
+        # --- 4b. Lettura del sigillo (#71): l'exe riconosce il PDF bloccato ---
+        report = seal_dir / "verifica.txt"
+        try:
+            code = subprocess.run([str(EXE), "--piedf-verifica", str(sealed), str(seal_dir / "sigillo"), str(report)],
+                                  timeout=120).returncode
+        except subprocess.TimeoutExpired:
+            code = "timeout"
+        text = report.read_text(encoding="utf-8") if report.exists() else ""
+        check("sigillo: l'exe legge il sigillo (barra integra, «da te»)",
+              code == 0 and re.fullmatch(r"Firmato e bloccato il \d\d/\d\d/\d{4} alle \d\d:\d\d da te \(Prova Exe\)", text),
+              f"codice {code}: {text}")
+        check("sigillo: nessun processo PieDF rimasto dopo la verifica", wait_for(lambda: not pids(), EXIT_TIMEOUT), str(pids()))
+        # Aprendo il PDF bloccato parte il processo della verifica (GUI + render + verifica), che poi finisce.
+        proc, win, secs = run(EXE, sealed)
+        check("sigillo: l'exe apre il PDF bloccato", win is not None, f"{secs:.1f} s")
+        counts = []
+        t = time.perf_counter()
+        while time.perf_counter() - t < WINDOW_TIMEOUT:
+            counts.append(len(pids()))
+            if 3 in counts and counts[-1] == 2:
+                break
+            time.sleep(0.1)
+        check("sigillo: la verifica gira in un processo a parte e finisce", 3 in counts and counts[-1] == 2,
+              str(sorted(set(counts))))
+        check("sigillo: alla chiusura non resta nessun processo", stop(proc, win), str(pids()))
     shutil.rmtree(seal_dir, ignore_errors=True)
 
     # --- 5. Onefile, solo per i numeri della PR (se è stato costruito) ---

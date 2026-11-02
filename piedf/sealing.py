@@ -13,7 +13,9 @@ cifrata con DPAPI dell'utente Windows (`CryptProtectData` via ctypes). Copiata s
 o utente la chiave non si decifra: `identity_state` → "foreign".
 
 pyHanko (e cryptography) si importano solo in `seal` / `create_identity`, che girano nel
-processo del sigillo (`run`): l'avvio di PieDF non cambia e la GUI non si ferma.
+processo del sigillo (`run`), e in `seal_status`, che gira nel processo della verifica
+(`check`, #71): l'avvio di PieDF non cambia e la GUI non si ferma. `docmdp_level` (solo
+PyMuPDF) è il controllo rapido dell'apertura.
 """
 
 import ctypes
@@ -28,6 +30,7 @@ import socket
 import sys
 import types
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 import pymupdf
@@ -460,6 +463,193 @@ def seal(src: str, password: str | None, dest: str, folder: Path, tsa_url: str |
             os.remove(tmp)
         except OSError:
             pass
+
+
+# --- Lettura del sigillo (#71) ---------------------------------------------------------------
+
+INTACT, MODIFIED, INVALID = "intact", "modified", "invalid"
+CHECKING_TEXT = "Controllo del sigillo…"
+INVALID_TEXT = "Il sigillo di questo documento non è valido."
+LOCKED_TIP = "Il documento è bloccato"
+
+
+@dataclass
+class SealStatus:
+    """Stato della firma di certificazione con DocMDP 1 (`seal_status`)."""
+
+    state: str  # INTACT, MODIFIED o INVALID
+    signer: str = ""  # nome nel certificato
+    when: datetime.datetime | None = None  # ora della firma (della marca temporale se c'è)
+    timestamped: bool = False  # marca temporale integra: «data certificata»
+    own: bool = False  # stessa chiave pubblica del certificato personale di questo utente
+    personal: bool = False  # certificato di un sigillo personale di PieDF
+
+
+def docmdp_level(doc) -> int | None:
+    """Livello DocMDP (1, 2, 3) della firma di certificazione del PDF aperto con PyMuPDF, None se
+    non è certificato. Solo il catalogo (/Perms /DocMDP → /Reference): veloce, senza pyHanko."""
+    try:
+        kind, value = doc.xref_get_key(doc.pdf_catalog(), "Perms/DocMDP")
+        if kind != "xref":
+            return None
+        kind, ref = doc.xref_get_key(int(_REF.match(value).group(1)), "Reference")
+        if kind == "xref":
+            ref = doc.xref_object(int(_REF.match(ref).group(1)))
+        elif kind != "array":
+            return None
+        # Gli elementi (e i loro /TransformParams) possono essere oggetti a parte.
+        for _ in range(2):
+            ref = _REF.sub(lambda m: doc.xref_object(int(m.group(1))) if 0 < int(m.group(1)) < doc.xref_length() else "",
+                           ref)
+        if not re.search(r"/TransformMethod\s*/DocMDP\b", ref):
+            return None
+        level = re.search(r"/P\s*(\d+)", ref)
+        return int(level.group(1)) if level else 2  # senza /P vale 2 (ISO 32000, 12.8.2.2)
+    except Exception:
+        return None
+
+
+def _quiet_logs() -> None:
+    """pyHanko scrive nel log ogni certificato non fidato: qui la fiducia non si verifica."""
+    import logging
+    for name in ("pyhanko", "pyhanko_certvalidator"):
+        logging.getLogger(name).setLevel(logging.CRITICAL)
+
+
+def seal_status(path: str, password: str | None = None, folder: Path | None = None) -> SealStatus | None:
+    """Stato della firma di certificazione «nessuna modifica» (DocMDP 1) del PDF; None se non
+    ce n'è una. Solo lettura, con pyHanko: niente catena di fiducia, niente revoca, niente rete.
+    `folder` = cartella del sigillo personale (per riconoscere i PDF bloccati dall'utente)."""
+    _stub_aiohttp()
+    _quiet_logs()
+    from pyhanko.pdf_utils.crypt import AuthStatus
+    from pyhanko.pdf_utils.reader import PdfFileReader
+    from pyhanko.sign.fields import MDPPerm
+    from pyhanko.sign.validation import validate_pdf_signature
+    from pyhanko.sign.validation.status import SignatureCoverageLevel
+    from pyhanko_certvalidator import ValidationContext
+
+    try:
+        with open(path, "rb") as f:
+            reader = PdfFileReader(io.BytesIO(f.read()), strict=False)
+        if reader.security_handler is not None and reader.decrypt(password or "").status == AuthStatus.FAILED:
+            return SealStatus(INVALID)
+        certified = [s for s in reader.embedded_signatures if s.docmdp_level is not None]
+    except Exception:
+        return SealStatus(INVALID)
+    if not certified:
+        try:
+            perms = reader.root.get("/Perms")
+            return SealStatus(INVALID) if perms is not None and "/DocMDP" in perms else None
+        except Exception:
+            return SealStatus(INVALID)
+    sig = certified[0]
+    if sig.docmdp_level != MDPPerm.NO_CHANGES:
+        return None
+
+    status = SealStatus(INVALID)
+    try:
+        cert = sig.signer_cert
+        subject = cert.subject.native
+        status.signer = subject.get("common_name") or cert.subject.human_friendly
+        status.personal = subject.get("organization_name") == ORGANIZATION
+        status.own = folder is not None and cert.public_key.dump() in _own_keys(Path(folder))
+    except Exception:
+        return status
+    try:
+        # Nessuna radice di fiducia e niente rete: si controllano solo integrità e modifiche.
+        # `trust_roots=[]` esplicito: senza, pyHanko legge le radici di sistema con oscrypto,
+        # che l'exe non ha (lo spec lo esclude) e la verifica fallirebbe sempre.
+        context = ValidationContext(trust_roots=[], allow_fetching=False)
+        result = validate_pdf_signature(sig, context, ValidationContext(trust_roots=[], allow_fetching=False))
+    except Exception:
+        return status
+    ts = result.timestamp_validity
+    status.timestamped = ts is not None and ts.intact and ts.valid
+    status.when = ts.timestamp if status.timestamped else result.signer_reported_dt
+    if not (result.intact and result.valid):
+        return status
+    # Integro: la firma copre tutto il file, oppure dopo ci sono solo revisioni ammesse
+    # (con DocMDP 1 nessuna, salvo le informazioni per la verifica a lungo termine).
+    if result.coverage == SignatureCoverageLevel.ENTIRE_FILE or result.docmdp_ok:
+        status.state = INTACT
+    else:
+        status.state = MODIFIED
+    return status
+
+
+def _own_keys(folder: Path) -> set[bytes]:
+    """Chiavi pubbliche (DER) dei certificati di questo utente: il sigillo personale e i
+    certificati importati (#75) la cui chiave si decifra su questo PC."""
+    from asn1crypto import pem, x509
+
+    def public(path: Path) -> bytes:
+        data = path.read_bytes()
+        if pem.detect(data):
+            data = pem.unarmor(data)[2]  # il primo blocco: il certificato, poi la catena
+        return x509.Certificate.load(data).public_key.dump()
+
+    keys = set()
+    try:
+        keys.add(public(folder / CERT_FILE))
+    except Exception:
+        pass
+    for crt in sorted(folder.glob("*.crt")) if folder.is_dir() else []:
+        try:
+            unprotect(crt.with_suffix(".key").read_bytes())
+            keys.add(public(crt))
+        except Exception:
+            continue
+    return keys
+
+
+def describe(status: SealStatus) -> str:
+    """Testo della barra del sigillo."""
+    if status.state == INVALID:
+        return INVALID_TEXT
+    who = f"te ({status.signer})" if status.own else status.signer
+    when = status.when.astimezone() if status.when is not None else None
+    date = f" il {when:%d/%m/%Y}" if when is not None else ""
+    if status.state == MODIFIED:
+        return f"Attenzione: il documento è stato modificato dopo essere stato bloccato{date} da {who}."
+    if when is not None:
+        date += f" alle {when:%H:%M}"
+    notes = []
+    if not status.own:
+        notes.append("sigillo personale, identità non verificata" if status.personal
+                     else "identità non verificata da PieDF")
+    if status.timestamped:
+        notes.append("data certificata")
+    text = f"Firmato e bloccato{date} da {who}"
+    if notes and status.own:
+        return f"{text}, {', '.join(notes)}"
+    return f"{text} ({', '.join(notes)})" if notes else text
+
+
+def check(path: str, password: str | None, folder: str, delay: float, results) -> None:
+    """Processo della verifica del sigillo: ("status", SealStatus | None). `delay` (secondi)
+    solo per i controlli: rallenta apposta la verifica."""
+    if delay:
+        import time
+        time.sleep(delay)
+    try:
+        status = seal_status(path, password, Path(folder))
+    except Exception:
+        status = SealStatus(INVALID)
+    results.put(("status", status))
+
+
+def verify_cli(args: list[str]) -> int:
+    """`PieDF.exe --piedf-verifica <pdf> <cartella sigillo> <uscita.txt>`: scrive il testo della
+    barra del sigillo (o «nessun sigillo»), per provare l'exe (`tests/check_exe.py`)."""
+    src, folder, out = args
+    try:
+        status = seal_status(src, None, Path(folder))
+        text = "nessun sigillo" if status is None else describe(status)
+    except Exception as e:
+        text = f"{type(e).__name__}: {e}"
+    Path(out).write_text(text, encoding="utf-8")
+    return 0
 
 
 def _write_message(dest: str, error: Exception) -> str:

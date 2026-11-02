@@ -38,7 +38,7 @@ python tools/build_exe.py --onefile   # dist\PieDF.exe, un solo file (solo per c
 python tests/run_all.py exe           # avvia l'exe e controlla processi, dati portatili, chiusura, sigillo
 ```
 
-`check_exe.py` prova il sigillo nell'exe con un'opzione nascosta, senza finestra: `PieDF.exe --piedf-sigilla <pdf> <destinazione> <cartella del sigillo> <nome>` (uscita 0 se riuscito, altrimenti l'errore in `<destinazione>.errore.txt`).
+`check_exe.py` prova il sigillo nell'exe con un'opzione nascosta, senza finestra: `PieDF.exe --piedf-sigilla <pdf> <destinazione> <cartella del sigillo> <nome>` (uscita 0 se riuscito, altrimenti l'errore in `<destinazione>.errore.txt`). Allo stesso modo `PieDF.exe --piedf-verifica <pdf> <cartella del sigillo> <uscita.txt>` scrive in `<uscita.txt>` il testo della barra del sigillo (#71). In `check_lock.py` la verifica del sigillo si rallenta apposta con `piedf.locking.CHECK_DELAY` (secondi).
 
 Si distribuisce la versione a cartella (onedir) dentro lo zip: il onefile si scompatta in una cartella temporanea a ogni avvio, quindi parte più lento. Le opzioni di build (moduli Qt esclusi, icona, informazioni di versione) sono in `piedf.spec`.
 

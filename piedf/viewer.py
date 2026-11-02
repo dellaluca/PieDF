@@ -158,6 +158,9 @@ class PdfView(QAbstractScrollArea):
         # spazio della pagina come si vede. Le immagini della cache restano dritte: quelle ruotate
         # si tengono solo per le pagine visibili (pagina → (immagine dritta, rotazione, ruotata)).
         self._rotation = 0
+        # Documento bloccato (#71): come con la vista ruotata si legge soltanto, ma gli strumenti
+        # non partono (non raddrizzano niente). Si azzera aprendo o chiudendo un documento.
+        self._read_only = False
         self._rotated: dict[int, tuple[QImage, int, QImage]] = {}
         self._cache: OrderedDict[int, tuple[float, QImage]] = OrderedDict()
         self._cache_bytes = 0
@@ -261,6 +264,29 @@ class PdfView(QAbstractScrollArea):
     @property
     def rotation(self) -> int:
         return self._rotation
+
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
+
+    def set_read_only(self, on: bool) -> None:
+        """Documento bloccato: niente strumenti, firme, caselle, tratti né campi (clic e Tab)."""
+        self._read_only = on
+        if on:
+            self._close_editor(commit=False)
+            self.cancel_placing()
+            self.cancel_text_tool()
+            self.cancel_draw_tool()
+            self._placements.select(None)
+            self._annotations.select(None)
+            self._drag = self._box_drag = self._ink_drag = None
+            self._focus_field = None
+        self._update_cursor()
+        self.viewport().update()
+
+    def _editable(self) -> bool:
+        """False con la vista ruotata o il documento bloccato: il documento si legge soltanto."""
+        return not (self._rotation or self._read_only)
 
     def shown_size(self, index: int) -> tuple[float, float]:
         """Dimensione della pagina a schermo (punti), con la rotazione della vista."""
@@ -465,7 +491,7 @@ class PdfView(QAbstractScrollArea):
 
     def start_placing(self, signature: Signature) -> None:
         """Modalità posizionamento: l'anteprima segue il cursore, un clic la piazza."""
-        if not self._sizes:
+        if not self._sizes or self._read_only:
             return
         self.set_rotation(0)  # gli strumenti lavorano solo con la vista dritta
         self._close_editor(commit=True)
@@ -492,7 +518,7 @@ class PdfView(QAbstractScrollArea):
 
     def start_text_tool(self, date: str | None = None) -> None:
         """Modalità Testo (o Data con `date`): un clic sulla pagina mette una casella."""
-        if not self._sizes:
+        if not self._sizes or self._read_only:
             return
         self.set_rotation(0)
         self._close_editor(commit=True)
@@ -515,7 +541,7 @@ class PdfView(QAbstractScrollArea):
 
     def start_draw_tool(self, tool: str) -> None:
         """Penna, evidenziatore o gomma: resta attivo per più tratti, finché Esc o `cancel_draw_tool`."""
-        if not self._sizes:
+        if not self._sizes or self._read_only:
             return
         self.set_rotation(0)
         self._close_editor(commit=True)
@@ -615,6 +641,7 @@ class PdfView(QAbstractScrollArea):
         self._gen = gen
         self._sizes = page_sizes
         self._source = (path, password) if path is not None else None
+        self._read_only = False
         self._reset_rotation()
         self._clear_cache()
         self._current = -1
@@ -640,6 +667,7 @@ class PdfView(QAbstractScrollArea):
         self._gen += 1
         self._sizes = []
         self._source = None
+        self._read_only = False
         self._reset_rotation()
         self._clear_cache()
         self._relayout()
@@ -1146,8 +1174,8 @@ class PdfView(QAbstractScrollArea):
 
     def _hit(self, pos: QPointF) -> tuple[Placement | None, int | None]:
         """Firma sotto il punto e, se è la selezionata, l'angolo della maniglia (0-3)."""
-        if self._rotation:
-            return None, None  # con la vista ruotata il documento si legge soltanto
+        if not self._editable():
+            return None, None  # con la vista ruotata o bloccato il documento si legge soltanto
         selected = self._placements.selected
         if selected is not None and selected.page in self._visible_range():
             rect = self.page_rect_to_viewport(selected.page, selected.rect)
@@ -1707,7 +1735,7 @@ class PdfView(QAbstractScrollArea):
 
     def _field_at(self, pos: QPointF) -> FormField | None:
         """Campo compilabile sotto il punto della vista (i campi firma e i pulsanti non contano)."""
-        if self._rotation:
+        if not self._editable():
             return None
         for page in self._visible_range():
             for f in self._forms.on_page(page):
@@ -1765,7 +1793,7 @@ class PdfView(QAbstractScrollArea):
         return True
 
     def focusNextPrevChild(self, next: bool) -> bool:
-        if self._placing is None and self._sizes and not self._rotation and self._move_focus(next):
+        if self._placing is None and self._sizes and self._editable() and self._move_focus(next):
             return True
         return super().focusNextPrevChild(next)
 
@@ -1956,7 +1984,7 @@ class PdfView(QAbstractScrollArea):
 
     def _hit_box(self, pos: QPointF) -> tuple[TextBox | None, int | None]:
         """Casella sotto il punto e, se è la selezionata, il lato della maniglia (0 sinistra, 1 destra)."""
-        if self._rotation:
+        if not self._editable():
             return None, None
         visible = self._visible_range()
         selected = self._annotations.selected
@@ -2129,7 +2157,7 @@ class PdfView(QAbstractScrollArea):
     def _ink_at(self, pos: QPointF) -> Ink | None:
         """Tratto di PieDF sotto il punto della vista (quelli di altri programmi non contano)."""
         page = self.page_at(pos)
-        if page is None or self._rotation:
+        if page is None or not self._editable():
             return None
         pt = self.to_page_point(page, pos)
         return self._annotations.ink_at(page, (pt.x(), pt.y()), INK_HIT_PX / self._scale())

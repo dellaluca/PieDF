@@ -7,6 +7,7 @@ import pymupdf
 from piedf import fonts
 from piedf.fonts import EmbeddedFont
 from piedf.ink import bounds as ink_bounds
+from piedf.sealing import docmdp_level
 
 A4 =(595.0, 842.0)
 MAX_TOC = 20_000  # voci dell'indice: oltre si tagliano (un indice ciclico non finirebbe mai)
@@ -139,6 +140,8 @@ class PdfDocument:
     xfa: bool = False  # modulo XFA: i campi non si leggono
     annotations: list[Annotation] = field(default_factory=list)  # solo quelle di PieDF
     toc: list[TocEntry] = field(default_factory=list)  # indice (segnalibri), in ordine
+    # Firma di certificazione «nessuna modifica» (DocMDP 1, #71): il documento si legge soltanto.
+    certified: bool = False
 
 
 def open_document(path: str, password: str | None = None) -> PdfDocument:
@@ -173,7 +176,10 @@ def open_document(path: str, password: str | None = None) -> PdfDocument:
         fields = [] if xfa else _read_fields(doc)
         annotations = _read_annotations(doc)
         toc = _read_toc(doc, sizes)
-        return PdfDocument(path, password, sizes, doc.is_repaired or broken > 0, fields, xfa, annotations, toc)
+        # Solo il controllo rapido: la verifica vera del sigillo gira in un processo a parte.
+        certified = docmdp_level(doc) == 1  # solo il catalogo: niente per i PDF senza firme
+        return PdfDocument(path, password, sizes, doc.is_repaired or broken > 0, fields, xfa, annotations, toc,
+                           certified)
     finally:
         # Chiudere subito evita di tenere il file bloccato su Windows.
         doc.close()
