@@ -307,13 +307,15 @@ def signature_count(doc) -> int:
     """Firme digitali (campi /Sig con un valore) del PDF aperto con PyMuPDF (#73). Solo i campi,
     senza pyHanko: il controllo rapido dell'apertura; 0 se qualcosa non si legge."""
     try:
-        return sum(ft == "/Sig" for ft in _signed_fields(doc))
+        return sum(ft == "/Sig" for ft in _signed_fields(doc, typed_kids=False))
     except Exception:
         return 0
 
 
-def _signed_fields(doc):
-    """Tipo (/Sig o /DocTimeStamp) di ogni campo firma compilato."""
+def _signed_fields(doc, typed_kids: bool = True):
+    """Tipo (/Sig o /DocTimeStamp) di ogni campo firma compilato. `typed_kids=False` non scende
+    nei figli dei campi di altri tipi (testo, caselle…: i figli sono i loro widget): un modulo
+    da 1000 campi si legge in una manciata di ms invece di ~50."""
     kind, fields = doc.xref_get_key(doc.pdf_catalog(), "AcroForm/Fields")
     if kind == "xref":
         fields = doc.xref_object(int(_REF.match(fields).group(1)))
@@ -329,6 +331,8 @@ def _signed_fields(doc):
         if ft in ("/Sig", "/DocTimeStamp") and doc.xref_get_key(xref, "V")[0] != "null":
             yield ft
             continue  # i figli di un campo firmato sono i suoi widget, non altre firme
+        if not typed_kids and ft not in ("", "/Sig", "/DocTimeStamp"):
+            continue
         kids = doc.xref_get_key(xref, "Kids")
         if kids[0] == "xref":
             kids = ("array", doc.xref_object(int(_REF.match(kids[1]).group(1))))
