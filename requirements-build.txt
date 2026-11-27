@@ -1,1 +1,3 @@
 pyinstaller==6.22.3
+# Fissato: la 2026.10 aggiunge un hook per pymupdf che porta nell'exe onnxruntime e numpy (zip da 53 a 96 MB).
+pyinstaller-hooks-contrib==2026.9
