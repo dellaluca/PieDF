@@ -3,7 +3,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QEvent, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QDate, QEvent, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QFontDatabase, QIcon, QKeySequence, QPixmap
 from PySide6.QtPrintSupport import QAbstractPrintDialog, QPrintDialog, QPrinter, QPrinterInfo
 from PySide6.QtWidgets import (
@@ -62,10 +62,10 @@ from piedf.printing import NO_PRINT_MESSAGE, PrintJob, PrintOptions, PrintOption
 from piedf.renderer import Renderer
 from piedf.sealing import (
     ALREADY_SIGNED, CHECKING_TEXT, FOREIGN, INTACT, LOCKED_TIP, TIMESTAMP_FAILED, TMP_SUFFIX, TSA_URL, default_name, describe,
-    has_signatures, identity_state, seal_dir,
+    SignatureInfo, has_signatures, identity_state, seal_dir,
 )
 from piedf.search_bar import SearchBar
-from piedf.sidebar import PAGES_TAB, TOC_TAB, Sidebar
+from piedf.sidebar import PAGES_TAB, SIGNATURES_TAB, TOC_TAB, Sidebar
 from piedf.signature_dialog import SignatureDialog
 from piedf.signature_manager import SignatureManager, choose_data_folder, thumbnail_pixmap
 from piedf.signatures import Kind, Signature, SignatureStore
@@ -196,8 +196,17 @@ class MainWindow(QMainWindow):
         self.sidebar = Sidebar(self._renderer, self)
         self.sidebar.page_clicked.connect(self._go_to_thumbnail)
         self.sidebar.toc_clicked.connect(lambda page, y: self._follow_link(page, self.view.view_y(page, y)))
+        self.sidebar.signatures.signature_clicked.connect(self._go_to_signature)
+        self.sidebar.signatures.save_requested.connect(self.save_signed_version)
         self.view.rotation_changed.connect(self._on_rotation_changed)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.sidebar)
+        # Firme digitali del documento (#73): risultati della verifica e nota nella barra di stato.
+        self._signatures: list[SignatureInfo] = []
+        self.signatures_note = QLabel()
+        self.signatures_note.setTextFormat(Qt.TextFormat.RichText)
+        self.signatures_note.linkActivated.connect(lambda _: self.show_signatures())
+        self.statusBar().addPermanentWidget(self.signatures_note)
+        self.signatures_note.hide()
 
         # Se il programma si blocca, la posizione di lettura si perde al massimo per questo intervallo.
         self._position_timer = QTimer(self)
@@ -769,35 +778,111 @@ class MainWindow(QMainWindow):
         self.seal_bar.show()
 
     def _check_seal(self, doc: PdfDocument | None) -> None:
-        """Documento bloccato: sola lettura subito (controllo rapido di `open_document`), poi la
-        verifica del sigillo in un processo a parte; il risultato di un documento non più aperto
-        si scarta."""
+        """Documento bloccato: sola lettura subito (controllo rapido di `open_document`). Con un
+        sigillo o firme digitali (#73) una sola verifica in un processo a parte, che riempie sia
+        la barra del sigillo sia la scheda Firme; il risultato di un documento non più aperto si
+        scarta. Senza firme nessun processo."""
         if self._seal_check is not None:
             self._seal_check.cancel()
             self._seal_check.deleteLater()
             self._seal_check = None
         self._locked = doc is not None and doc.certified
         self.view.set_read_only(self._locked)
-        if not self._locked:
-            self._show_seal(None)
+        count = doc.signatures if doc is not None else 0
+        self._signatures = []
+        self.sidebar.set_signatures_tab(count > 0)
+        self._show_signature_count(count)
+        self._show_seal(CHECKING_TEXT if self._locked else None)
+        if not self._locked and not count:
             return
-        self._show_seal(CHECKING_TEXT)
         job = SealCheckJob(self._path, self._password, seal_dir(paths.data_dir()), self)
         self._seal_check = job
         gen = self._gen
 
-        def done(status) -> None:
+        def done(status, signatures) -> None:
             if job is not self._seal_check or gen != self._gen:
                 return
             self._seal_check = None
             job.deleteLater()
-            if status is None:
-                self._show_seal(None)
-            else:
-                self._show_seal(describe(status), alert=status.state != INTACT)
+            if self._locked:
+                if status is None:
+                    self._show_seal(None)
+                else:
+                    self._show_seal(describe(status), alert=status.state != INTACT)
+            if count:
+                self._signatures = signatures or []
+                self.sidebar.signatures.set_signatures(signatures)
 
         job.finished.connect(done)
         job.start()
+
+    def _show_signature_count(self, count: int) -> None:
+        """«Questo documento ha N firme digitali · Mostra» nella barra di stato (#73)."""
+        if not count:
+            self.signatures_note.hide()
+            return
+        what = "1 firma digitale" if count == 1 else f"{count} firme digitali"
+        self.signatures_note.setText(f'Questo documento ha {what} · <a href="mostra">Mostra</a>')
+        self.signatures_note.show()
+
+    def show_signatures(self) -> None:
+        """Apre il pannello laterale sulla scheda Firme."""
+        if not self.sidebar.tabs.isTabVisible(SIGNATURES_TAB):
+            return
+        self._set_sidebar(True)
+        self.sidebar.tabs.setCurrentIndex(SIGNATURES_TAB)
+
+    def _go_to_signature(self, index: int) -> None:
+        """Clic su una firma visibile della scheda Firme: la vista va al suo campo."""
+        if not 0 <= index < len(self._signatures):
+            return
+        info = self._signatures[index]
+        if info.page < 0 or info.rect is None:
+            return
+        self._back = (self._back + [self.view.scroll_position()])[-MAX_HISTORY:]
+        self._forward = []
+        x0, y0, x1, y1 = info.rect
+        self.view.scroll_to_rect(info.page, QRectF(x0, y0, x1 - x0, y1 - y0))
+        self._update_enabled()
+
+    def save_signed_version(self, index: int) -> bool:
+        """«Salva la versione firmata…»: i byte del file fino alla fine della revisione coperta
+        dalla firma `index` (/ByteRange), cioè esattamente quello che è stato firmato."""
+        if self._path is None or not 0 <= index < len(self._signatures):
+            return False
+        end = self._signatures[index].end
+        src = Path(self._shown_path())
+        proposed = str(src.with_name(f"{src.stem}_versione_firmata_{index + 1}.pdf"))
+        dest, _ = QFileDialog.getSaveFileName(self, "Salva la versione firmata", proposed, "Documenti PDF (*.pdf)")
+        if not dest:
+            return False
+        if not Path(dest).suffix:
+            dest += ".pdf"
+        dest = os.path.abspath(dest)
+        if os.path.normcase(dest) in (os.path.normcase(self._path), os.path.normcase(str(src))):
+            QMessageBox.warning(self, "Salva la versione firmata",
+                                "Questo è il documento aperto: scegli un altro nome per la versione firmata.")
+            return False
+        tmp = dest + TMP_SUFFIX
+        try:
+            with open(self._path, "rb") as f:
+                data = f.read(end) if end > 0 else b""
+            if not end or len(data) != end:
+                raise OSError("la revisione firmata non si trova nel file")
+            with open(tmp, "wb") as out:
+                out.write(data)
+            os.replace(tmp, dest)
+        except OSError as e:
+            remove_quietly(tmp)
+            QMessageBox.critical(
+                self, "Salvataggio non riuscito",
+                f"Impossibile scrivere «{Path(dest).name}».\n\n"
+                "La cartella potrebbe non essere scrivibile oppure il file è aperto in un altro programma.\n\n"
+                f"Dettagli: {e}",
+            )
+            return False
+        self.statusBar().showMessage(f"Versione firmata salvata in {Path(dest).name}", 10000)
+        return True
 
     def _update_form_bar(self, doc: PdfDocument | None) -> None:
         if doc is not None and doc.certified:

@@ -1,6 +1,6 @@
 """«Salva e blocca» (#70), lato GUI: conferma, nome del sigillo e `SealJob`, il processo che
 appiattisce e sigilla il PDF con `sealing.run` (pyHanko tiene il GIL: fuori dalla GUI).
-`SealCheckJob` (#71) verifica il sigillo di un PDF aperto con `sealing.check`."""
+`SealCheckJob` (#71, #73) verifica il sigillo e le firme di un PDF aperto con `sealing.check`."""
 
 import multiprocessing
 import os
@@ -171,20 +171,24 @@ class SealJob(QObject):
 
 # Solo per i controlli: secondi di attesa del processo di verifica prima di leggere il file.
 CHECK_DELAY = 0.0
+# Solo per i controlli: radici di fiducia (DER) al posto dell'archivio di Windows; None = Windows.
+TRUST_ROOTS: list[bytes] | None = None
 
 
 class SealCheckJob(QObject):
-    """Verifica del sigillo (#71) con `sealing.check` in un processo "spawn": pyHanko tiene il GIL
-    e si importa solo lì. `finished` porta lo stato (`SealStatus` o None)."""
+    """Verifica del sigillo (#71) e delle firme (#73) con `sealing.check` in un processo "spawn":
+    pyHanko tiene il GIL e si importa solo lì. `finished` porta (stato del sigillo `SealStatus`
+    o None, firme `list[SignatureInfo]` o None se non si leggono)."""
 
-    finished = Signal(object)
+    finished = Signal(object, object)
 
     def __init__(self, path: str, password: str | None, folder, parent=None) -> None:
         super().__init__(parent)
         ctx = multiprocessing.get_context("spawn")
         self._results = ctx.Queue()
         self._process = ctx.Process(
-            target=sealing.check, args=(path, password, str(folder), CHECK_DELAY, self._results), daemon=True,
+            target=sealing.check, args=(path, password, str(folder), CHECK_DELAY, TRUST_ROOTS, self._results),
+            daemon=True,
         )
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_MS)
@@ -215,8 +219,8 @@ class SealCheckJob(QObject):
             try:  # il risultato può arrivare insieme alla fine del processo
                 msg = self._results.get(timeout=0.5)
             except queue.Empty:
-                msg = ("status", sealing.SealStatus(sealing.INVALID))
+                msg = ("status", sealing.SealStatus(sealing.INVALID), None)
         self._done = True
         self._timer.stop()
         self._process.join(1)
-        self.finished.emit(msg[1])
+        self.finished.emit(msg[1], msg[2])

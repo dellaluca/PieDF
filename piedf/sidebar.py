@@ -1,4 +1,5 @@
-"""Pannello laterale (#6): miniature delle pagine e indice (segnalibri) del PDF.
+"""Pannello laterale (#6): miniature delle pagine, indice (segnalibri) e, solo per i PDF con
+firme digitali, la scheda Firme (#73, `signatures_panel`).
 
 Le miniature le disegna il processo di render della vista (`Renderer.request_thumbs`), che ha
 già il documento aperto, con una priorità più bassa delle pagine della vista: si chiedono solo
@@ -22,13 +23,14 @@ from piedf.document import TocEntry
 from piedf.page_ops import MAIN, PageRef
 from piedf.page_organizer import PageDelegate, PageModel
 from piedf.renderer import Renderer
+from piedf.signatures_panel import SignaturesPanel
 
 THUMB = 160  # lato massimo della miniatura, px logici: un A4 verticale è largo ~113 px
 AHEAD = 4  # miniature da preparare oltre quelle visibili
 REQUEST_MS = 30  # le richieste si raccolgono: lo scorrimento veloce non ne manda una per evento
 NO_TOC = "Questo documento non ha un indice"
 PAGE_ROLE = Qt.ItemDataRole.UserRole + 1  # voce dell'indice: (pagina, y o None)
-PAGES_TAB, TOC_TAB = 0, 1
+PAGES_TAB, TOC_TAB, SIGNATURES_TAB = 0, 1, 2
 
 
 class Sidebar(QDockWidget):
@@ -84,10 +86,14 @@ class Sidebar(QDockWidget):
         self.toc_stack.addWidget(self.no_toc)
         self.toc_stack.addWidget(self.toc)
 
+        self.signatures = SignaturesPanel()
+
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.tabs.addTab(self.pages, "Pagine")
         self.tabs.addTab(self.toc_stack, "Indice")
+        self.tabs.addTab(self.signatures, "Firme")
+        self.tabs.setTabVisible(SIGNATURES_TAB, False)  # solo per i PDF con firme digitali
         self.tabs.currentChanged.connect(self._schedule)
         self.setWidget(self.tabs)
 
@@ -110,7 +116,16 @@ class Sidebar(QDockWidget):
 
     def clear(self) -> None:
         self.set_document(-1, [], [])
+        self.set_signatures_tab(False)
         self._gen = None
+
+    def set_signatures_tab(self, visible: bool) -> None:
+        """Scheda Firme visibile («Controllo delle firme…» finché non arrivano i risultati)."""
+        if visible:
+            self.signatures.set_checking()
+        elif self.tabs.currentIndex() == SIGNATURES_TAB:
+            self.tabs.setCurrentIndex(PAGES_TAB)
+        self.tabs.setTabVisible(SIGNATURES_TAB, visible)
 
     def set_current(self, page: int) -> None:
         """Evidenzia la miniatura della pagina corrente e la tiene in vista."""
