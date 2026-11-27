@@ -13,9 +13,9 @@ cifrata con DPAPI dell'utente Windows (`CryptProtectData` via ctypes). Copiata s
 o utente la chiave non si decifra: `identity_state` → "foreign".
 
 pyHanko (e cryptography) si importano solo in `seal` / `create_identity`, che girano nel
-processo del sigillo (`run`), e in `seal_status`, che gira nel processo della verifica
-(`check`, #71): l'avvio di PieDF non cambia e la GUI non si ferma. `docmdp_level` (solo
-PyMuPDF) è il controllo rapido dell'apertura.
+processo del sigillo (`run`), e in `verify`, che gira nel processo della verifica (`check`,
+#71, #73: sigillo e scheda Firme): l'avvio di PieDF non cambia e la GUI non si ferma.
+`docmdp_level` e `signature_count` (solo PyMuPDF) sono i controlli rapidi dell'apertura.
 """
 
 import ctypes
@@ -298,10 +298,25 @@ def has_signatures(path: str, password: str | None = None) -> bool:
 
 
 def _signed(doc) -> bool:
-    catalog = doc.pdf_catalog()
-    if doc.xref_get_key(catalog, "Perms")[0] != "null":
+    if doc.xref_get_key(doc.pdf_catalog(), "Perms")[0] != "null":
         return True
-    kind, fields = doc.xref_get_key(catalog, "AcroForm/Fields")
+    return next(_signed_fields(doc), None) is not None
+
+
+def signature_count(doc) -> int:
+    """Firme digitali (campi /Sig con un valore) del PDF aperto con PyMuPDF (#73). Solo i campi,
+    senza pyHanko: il controllo rapido dell'apertura; 0 se qualcosa non si legge."""
+    try:
+        return sum(ft == "/Sig" for ft in _signed_fields(doc, typed_kids=False))
+    except Exception:
+        return 0
+
+
+def _signed_fields(doc, typed_kids: bool = True):
+    """Tipo (/Sig o /DocTimeStamp) di ogni campo firma compilato. `typed_kids=False` non scende
+    nei figli dei campi di altri tipi (testo, caselle…: i figli sono i loro widget): un modulo
+    da 1000 campi si legge in una manciata di ms invece di ~50."""
+    kind, fields = doc.xref_get_key(doc.pdf_catalog(), "AcroForm/Fields")
     if kind == "xref":
         fields = doc.xref_object(int(_REF.match(fields).group(1)))
     todo = [(int(n), "") for n in _REF.findall(fields)] if kind in ("array", "xref") else []
@@ -314,13 +329,15 @@ def _signed(doc) -> bool:
         ft = doc.xref_get_key(xref, "FT")
         ft = ft[1] if ft[0] == "name" else inherited
         if ft in ("/Sig", "/DocTimeStamp") and doc.xref_get_key(xref, "V")[0] != "null":
-            return True
+            yield ft
+            continue  # i figli di un campo firmato sono i suoi widget, non altre firme
+        if not typed_kids and ft not in ("", "/Sig", "/DocTimeStamp"):
+            continue
         kids = doc.xref_get_key(xref, "Kids")
         if kids[0] == "xref":
             kids = ("array", doc.xref_object(int(_REF.match(kids[1]).group(1))))
         if kids[0] == "array":
             todo += [(int(n), ft) for n in _REF.findall(kids[1])]
-    return False
 
 
 # --- Sigillo --------------------------------------------------------------------------------
@@ -520,62 +537,267 @@ def seal_status(path: str, password: str | None = None, folder: Path | None = No
     """Stato della firma di certificazione «nessuna modifica» (DocMDP 1) del PDF; None se non
     ce n'è una. Solo lettura, con pyHanko: niente catena di fiducia, niente revoca, niente rete.
     `folder` = cartella del sigillo personale (per riconoscere i PDF bloccati dall'utente)."""
+    return verify(path, password, folder, roots=[])[0]
+
+
+# --- Firme del documento (#73) ----------------------------------------------------------------
+
+ALLOWED = "allowed"  # integra, con revisioni successive ammesse (altre firme, compilazione…)
+SIGNATURES_CHECKING = "Controllo delle firme…"
+SIGNATURES_FAILED = "Impossibile controllare le firme di questo documento."
+REVOCATION_NOTE = ("PieDF non controlla se i certificati sono stati revocati: servirebbe una "
+                   "connessione a internet.")
+STATE_TEXT = {
+    INTACT: "Integra",
+    ALLOWED: "Integra, con modifiche ammesse dopo",
+    MODIFIED: "Modificato dopo la firma",
+    INVALID: "Non valida",
+}
+KIND_TEXT = {
+    None: "Firma di approvazione",
+    1: "Certificazione (nessuna modifica consentita)",
+    2: "Certificazione (consentita la compilazione e altre firme)",
+    3: "Certificazione (consentite la compilazione, le annotazioni e altre firme)",
+}
+UNTRUSTED_TEXT = "Identità non verificata da PieDF"
+
+
+@dataclass
+class SignatureInfo:
+    """Una firma digitale del PDF (`verify`), in ordine di revisione."""
+
+    field: str  # nome del campo
+    state: str = INVALID  # INTACT, ALLOWED, MODIFIED o INVALID
+    signer: str = ""  # CN del certificato
+    when: datetime.datetime | None = None  # della marca temporale se c'è, altrimenti dichiarata
+    timestamped: bool = False  # marca temporale integra: «data certificata»
+    docmdp: int | None = None  # livello DocMDP della certificazione; None = firma di approvazione
+    trusted: bool = False  # catena fino a una radice di fiducia (archivio di Windows)
+    issuer: str = ""  # emittente del certificato del firmatario
+    own: bool = False  # chiave di questo utente (come `SealStatus.own`)
+    personal: bool = False  # sigillo personale di PieDF
+    page: int = -1  # pagina del campo (da 0); -1 = firma invisibile
+    rect: tuple[float, float, float, float] | None = None  # nello spazio della pagina come si vede
+    end: int = 0  # fine della revisione firmata (/ByteRange): i byte del file da 0 a `end`
+    details: tuple[tuple[str, str], ...] = ()  # (voce, valore) del certificato, per il dialog
+
+
+def system_roots() -> tuple[list[bytes], list[bytes]]:
+    """(radici, intermedie) in DER dall'archivio dei certificati di Windows ("ROOT" e "CA"),
+    offline. Fuori da Windows niente. Si chiama solo nel processo della verifica."""
+    if sys.platform != "win32":
+        return [], []
+    import ssl
+    found = []
+    for store in ("ROOT", "CA"):
+        try:
+            found.append([der for der, encoding, _ in ssl.enum_certificates(store) if encoding == "x509_asn"])
+        except (OSError, AttributeError):
+            found.append([])
+    return found[0], found[1]
+
+
+def verify(path: str, password: str | None = None, folder: Path | None = None,
+           roots: list[bytes] | None = None, intermediates: list[bytes] = ()) -> tuple[SealStatus | None, list[SignatureInfo] | None]:
+    """Un solo passaggio di verifica del PDF: (stato del sigillo come `seal_status`, firme).
+
+    Ogni firma si valida una volta con pyHanko (integrità, differenze tra le revisioni, catena
+    fino a `roots`; None = l'archivio di Windows). Niente revoca, niente rete. Firme None = il
+    file non si legge. `folder` = cartella del sigillo personale (firme «da te»)."""
     _stub_aiohttp()
     _quiet_logs()
+    from asn1crypto import x509
     from pyhanko.pdf_utils.crypt import AuthStatus
     from pyhanko.pdf_utils.reader import PdfFileReader
-    from pyhanko.sign.fields import MDPPerm
-    from pyhanko.sign.validation import validate_pdf_signature
-    from pyhanko.sign.validation.status import SignatureCoverageLevel
-    from pyhanko_certvalidator import ValidationContext
+
+    if roots is None:
+        roots, intermediates = system_roots()
+
+    def load(items):
+        out = []
+        for der in items:
+            try:
+                cert = x509.Certificate.load(der)
+                cert.native  # un certificato rovinato dell'archivio non deve fermare tutto
+            except Exception:
+                continue
+            out.append(cert)
+        return out
 
     try:
         with open(path, "rb") as f:
-            reader = PdfFileReader(io.BytesIO(f.read()), strict=False)
+            data = f.read()
+        reader = PdfFileReader(io.BytesIO(data), strict=False)
         if reader.security_handler is not None and reader.decrypt(password or "").status == AuthStatus.FAILED:
-            return SealStatus(INVALID)
-        certified = [s for s in reader.embedded_signatures if s.docmdp_level is not None]
+            return SealStatus(INVALID), None
+        embedded = reader.embedded_signatures
     except Exception:
-        return SealStatus(INVALID)
+        return SealStatus(INVALID), None
+
+    trust, others = load(roots), load(intermediates)
+    own = _own_keys(Path(folder)) if folder is not None else set()
+    places = _signature_places(data, password)
+    status = None
+    certified = False
+    infos = []
+    for sig in embedded:
+        info, result = _check_one(sig, trust, others, own, places)
+        try:
+            level = sig.docmdp_level
+        except Exception:
+            level = None
+        if level is not None and not certified:
+            certified = True  # conta la prima certificazione (ce n'è al più una)
+            if level.value == 1:
+                status = _seal_from(info, result)
+        try:
+            regular = sig.sig_object_type == "/Sig"
+        except Exception:
+            regular = True
+        if regular:
+            infos.append(info)
     if not certified:
         try:
             perms = reader.root.get("/Perms")
-            return SealStatus(INVALID) if perms is not None and "/DocMDP" in perms else None
+            if perms is not None and "/DocMDP" in perms:
+                status = SealStatus(INVALID)  # c'è una certificazione ma non si legge
         except Exception:
-            return SealStatus(INVALID)
-    sig = certified[0]
-    if sig.docmdp_level != MDPPerm.NO_CHANGES:
-        return None
+            status = SealStatus(INVALID)
+    return status, infos
 
-    status = SealStatus(INVALID)
+
+def _check_one(sig, trust, others, own: set[bytes], places: dict):
+    """(SignatureInfo, risultato di pyHanko o None) di una firma."""
+    from pyhanko.sign.validation import validate_pdf_signature
+    from pyhanko.sign.validation.settings import KeyUsageConstraints
+    from pyhanko.sign.validation.status import SignatureCoverageLevel
+    from pyhanko_certvalidator import ValidationContext
+
+    info = SignatureInfo(field=str(getattr(sig, "field_name", "") or ""))
+    try:
+        info.docmdp = sig.docmdp_level.value if sig.docmdp_level is not None else None
+    except Exception:
+        pass
+    try:
+        start, len1, start2, len2 = (int(n) for n in sig.byte_range)
+        info.end = start2 + len2
+    except Exception:
+        pass
+    try:
+        refs = [sig.sig_field.container_ref]
+        kids = sig.sig_field.get("/Kids")
+        refs += list(kids) if kids is not None else []
+        for ref in refs:
+            place = places.get(getattr(ref, "idnum", None))
+            if place is not None:
+                info.page, info.rect = place
+                break
+    except Exception:
+        pass
     try:
         cert = sig.signer_cert
         subject = cert.subject.native
-        status.signer = subject.get("common_name") or cert.subject.human_friendly
-        status.personal = subject.get("organization_name") == ORGANIZATION
-        status.own = folder is not None and cert.public_key.dump() in _own_keys(Path(folder))
+        info.signer = subject.get("common_name") or cert.subject.human_friendly
+        info.issuer = cert.issuer.native.get("common_name") or cert.issuer.human_friendly
+        info.personal = subject.get("organization_name") == ORGANIZATION
+        info.own = cert.public_key.dump() in own
+        info.details = _cert_details(cert)
     except Exception:
-        return status
+        return info, None
     try:
-        # Nessuna radice di fiducia e niente rete: si controllano solo integrità e modifiche.
-        # `trust_roots=[]` esplicito: senza, pyHanko legge le radici di sistema con oscrypto,
-        # che l'exe non ha (lo spec lo esclude) e la verifica fallirebbe sempre.
-        context = ValidationContext(trust_roots=[], allow_fetching=False)
-        result = validate_pdf_signature(sig, context, ValidationContext(trust_roots=[], allow_fetching=False))
+        # Radici solo quelle date (`trust_roots` va scritto: senza, pyHanko legge le radici di
+        # sistema con oscrypto, che l'exe non ha). Come i lettori PDF più diffusi, basta uno
+        # fra digitalSignature e nonRepudiation (pyHanko di suo vuole nonRepudiation).
+        def context():
+            return ValidationContext(trust_roots=trust, other_certs=others, allow_fetching=False)
+        usage = KeyUsageConstraints(key_usage={"digital_signature", "non_repudiation"})
+        result = validate_pdf_signature(sig, context(), context(), key_usage_settings=usage)
     except Exception:
-        return status
+        return info, None
     ts = result.timestamp_validity
-    status.timestamped = ts is not None and ts.intact and ts.valid
-    status.when = ts.timestamp if status.timestamped else result.signer_reported_dt
+    info.timestamped = ts is not None and ts.intact and ts.valid
+    info.when = ts.timestamp if info.timestamped else result.signer_reported_dt
+    info.trusted = bool(result.trusted)
     if not (result.intact and result.valid):
-        return status
-    # Integro: la firma copre tutto il file, oppure dopo ci sono solo revisioni ammesse
-    # (con DocMDP 1 nessuna, salvo le informazioni per la verifica a lungo termine).
-    if result.coverage == SignatureCoverageLevel.ENTIRE_FILE or result.docmdp_ok:
-        status.state = INTACT
+        info.state = INVALID
+    elif result.coverage == SignatureCoverageLevel.ENTIRE_FILE:
+        info.state = INTACT
+    elif result.docmdp_ok:
+        # Dopo ci sono solo revisioni ammesse (altre firme, compilazione; con DocMDP 1 solo
+        # le informazioni per la verifica a lungo termine).
+        info.state = ALLOWED
     else:
-        status.state = MODIFIED
+        info.state = MODIFIED
+    return info, result
+
+
+def _seal_from(info: SignatureInfo, result) -> SealStatus:
+    """Stato della barra del sigillo (#71) dalla firma di certificazione DocMDP 1."""
+    status = SealStatus(INVALID, info.signer, info.when, info.timestamped, info.own, info.personal)
+    if result is not None and info.state != INVALID:
+        status.state = MODIFIED if info.state == MODIFIED else INTACT
     return status
+
+
+def _signature_places(data: bytes, password: str | None) -> dict[int, tuple[int, tuple]]:
+    """xref del widget → (pagina, rettangolo come si vede) dei campi firma visibili."""
+    places = {}
+    try:
+        doc = pymupdf.open(stream=data, filetype="pdf")
+    except Exception:
+        return places
+    try:
+        if doc.needs_pass:
+            doc.authenticate(password or "")
+        for page in doc:
+            for widget in page.widgets(types=[pymupdf.PDF_WIDGET_TYPE_SIGNATURE]):
+                rect = widget.rect * page.rotation_matrix
+                if rect.width > 0.5 and rect.height > 0.5:
+                    places[widget.xref] = (page.number, (rect.x0, rect.y0, rect.x1, rect.y1))
+    except Exception:
+        pass
+    finally:
+        doc.close()
+    return places
+
+
+def _cert_details(cert) -> tuple[tuple[str, str], ...]:
+    """Voci del dialog «Dettagli del certificato»."""
+    def when(value) -> str:
+        return f"{value.astimezone():%d/%m/%Y %H:%M}"
+
+    validity = cert["tbs_certificate"]["validity"]
+    def pairs(hex_text: str) -> str:
+        hex_text = hex_text.upper().rjust(len(hex_text) + len(hex_text) % 2, "0")
+        return " ".join(hex_text[i:i + 2] for i in range(0, len(hex_text), 2))
+
+    validity = cert["tbs_certificate"]["validity"]
+    return (
+        ("Soggetto", cert.subject.human_friendly),
+        ("Emittente", cert.issuer.human_friendly),
+        ("Valido dal", when(validity["not_before"].native)),
+        ("Valido fino al", when(validity["not_after"].native)),
+        ("Numero di serie", pairs(f"{cert.serial_number:x}")),
+        ("Impronta SHA-256", pairs(hashlib.sha256(cert.dump()).hexdigest())),
+    )
+
+
+def signature_lines(info: SignatureInfo) -> list[str]:
+    """Righe della scheda Firme: nome, data, tipo, stato, identità."""
+    notes = (["da te"] if info.own else []) + (["sigillo personale"] if info.personal else [])
+    name = info.signer or "Firmatario sconosciuto"
+    if notes:
+        name += f" ({', '.join(notes)})"
+    if info.when is not None:
+        when = info.when.astimezone()
+        date = f"{when:%d/%m/%Y %H:%M}, " + ("data certificata" if info.timestamped else "data dichiarata dal firmatario")
+    else:
+        date = "Data non indicata"
+    if info.trusted:
+        identity = f"Identità verificata: certificato emesso da {info.issuer}, riconosciuto da Windows"
+    else:
+        identity = UNTRUSTED_TEXT
+    return [name, date, KIND_TEXT.get(info.docmdp, KIND_TEXT[2]), STATE_TEXT[info.state], identity]
 
 
 def _own_keys(folder: Path) -> set[bytes]:
@@ -626,17 +848,19 @@ def describe(status: SealStatus) -> str:
     return f"{text} ({', '.join(notes)})" if notes else text
 
 
-def check(path: str, password: str | None, folder: str, delay: float, results) -> None:
-    """Processo della verifica del sigillo: ("status", SealStatus | None). `delay` (secondi)
-    solo per i controlli: rallenta apposta la verifica."""
+def check(path: str, password: str | None, folder: str, delay: float, roots, results) -> None:
+    """Processo della verifica del sigillo e delle firme (#71, #73): ("status", SealStatus |
+    None, list[SignatureInfo] | None). `roots` = radici di fiducia in DER, None = archivio di
+    Windows (i controlli ne passano una di prova). `delay` (secondi) solo per i controlli:
+    rallenta apposta la verifica."""
     if delay:
         import time
         time.sleep(delay)
     try:
-        status = seal_status(path, password, Path(folder))
+        status, signatures = verify(path, password, Path(folder), roots)
     except Exception:
-        status = SealStatus(INVALID)
-    results.put(("status", status))
+        status, signatures = SealStatus(INVALID), None
+    results.put(("status", status, signatures))
 
 
 def verify_cli(args: list[str]) -> int:

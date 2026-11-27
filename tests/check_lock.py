@@ -789,9 +789,10 @@ def main():
 
     # --- 5. Firma di approvazione normale: niente barra, modificabile ---
     w.open_file(str(signed))
-    pump(0.3)
-    check("#71 5. firma di approvazione: niente barra né verifica",
-          w.seal_bar.isHidden() and w._seal_check is None and not w._locked, str(bar()))
+    checking = w.seal_bar.isVisible()
+    wait_seal()  # la verifica parte per la scheda Firme (#73), la barra resta nascosta
+    check("#71 5. firma di approvazione: niente barra del sigillo (né durante né dopo la verifica)",
+          not checking and w.seal_bar.isHidden() and not w._locked, str(bar()))
     check("#71 5. resta modificabile come oggi", w.act_text.isEnabled() and w.act_draw.isEnabled() and not v.read_only)
     check("#71 5. seal_status: nessuna certificazione = None",
           sealing.seal_status(str(signed)) is None and sealing.seal_status(str(PDFS / "semplice.pdf")) is None)

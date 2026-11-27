@@ -239,6 +239,77 @@ d.set_toc([
 ])
 d.save(out / "indice.pdf")
 
+# Firme digitali (#73): una piccola CA di prova (firme_ca.der, che i controlli passano come
+# radice di fiducia al posto dell'archivio di Windows) e due firmatari; firme con pyHanko.
+def signed_pdfs():
+    import datetime, io
+    from asn1crypto import keys, x509 as ax509
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from piedf import sealing
+    sealing._stub_aiohttp()  # pyHanko importa aiohttp, che PieDF non usa
+    from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+    from pyhanko.sign import fields, signers
+    from pyhanko_certvalidator.registry import SimpleCertificateStore
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    def cert(name, issuer=None):
+        key = ec.generate_private_key(ec.SECP256R1())
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+        issuer_name, issuer_key = (subject, key) if issuer is None else (issuer[2], issuer[3])
+        usage = dict(digital_signature=issuer is not None, content_commitment=issuer is not None, key_encipherment=False,
+                     data_encipherment=False, key_agreement=False, key_cert_sign=issuer is None,
+                     crl_sign=issuer is None, encipher_only=False, decipher_only=False)
+        c = (x509.CertificateBuilder().subject_name(subject).issuer_name(issuer_name).public_key(key.public_key())
+             .serial_number(x509.random_serial_number()).not_valid_before(now - datetime.timedelta(days=1))
+             .not_valid_after(now + datetime.timedelta(days=3650))
+             .add_extension(x509.BasicConstraints(ca=issuer is None, path_length=None), critical=True)
+             .add_extension(x509.KeyUsage(**usage), critical=True)
+             .sign(issuer_key, hashes.SHA256()))
+        der = c.public_bytes(serialization.Encoding.DER)
+        k = keys.PrivateKeyInfo.load(key.private_bytes(serialization.Encoding.DER, serialization.PrivateFormat.PKCS8,
+                                                       serialization.NoEncryption()))
+        return ax509.Certificate.load(der), k, subject, key
+
+    ca = cert("CA di prova PieDF")
+    mario, anna = cert("Mario Rossi", ca), cert("Anna Verdi", ca)
+    (out / "firme_ca.der").write_bytes(ca[0].dump())
+
+    def sign(src, dest, who, name, page=None, box=None):
+        with open(src, "rb") as f:
+            writer = IncrementalPdfFileWriter(io.BytesIO(f.read()))
+        if box is not None:
+            fields.append_signature_field(writer, fields.SigFieldSpec(name, on_page=page, box=box))
+        with open(dest, "wb") as f:
+            signers.PdfSigner(signers.PdfSignatureMetadata(field_name=name), signers.SimpleSigner(
+                signing_cert=who[0], signing_key=who[1], cert_registry=SimpleCertificateStore.from_certs([who[0], ca[0]]),
+            )).sign_pdf(writer, output=f)
+
+    d = pymupdf.open()
+    for i in range(3):
+        d.new_page(width=595, height=842).insert_text((72, 72), f"Contratto firmato, pagina {i + 1}", fontsize=20)
+    d.save(out / "firme_base.pdf")
+    # Firma visibile a pagina 3, in basso (pyHanko: coordinate PDF dal basso).
+    sign(out / "firme_base.pdf", out / "firme_una.pdf", mario, "FirmaMario", page=2, box=(72, 100, 272, 160))
+    sign(out / "firme_una.pdf", out / "firme_due.pdf", anna, "FirmaAnna")  # invisibile
+    # Salvataggio incrementale che cambia il contenuto di una pagina dopo la firma.
+    data = (out / "firme_una.pdf").read_bytes()
+    (out / "firme_modificato.pdf").write_bytes(data)
+    d = pymupdf.open(out / "firme_modificato.pdf")
+    d[0].insert_text((72, 140), "Aggiunto dopo la firma", fontsize=14)
+    d.saveIncr()
+    d.close()
+    # Un byte firmato cambiato (stessa lunghezza, la larghezza di una pagina): la firma non torna più.
+    i = data.index(b"595 842")
+    (out / "firme_alterato.pdf").write_bytes(data[:i] + b"596" + data[i + 3:])
+
+
+signed_pdfs()
+
 data = (out / "lungo_350.pdf").read_bytes()
 (out / "danneggiato.pdf").write_bytes(data[: len(data) // 2])  # troncato a metà: irrecuperabile
 i = data.rfind(b"xref")

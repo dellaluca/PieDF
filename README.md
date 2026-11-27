@@ -19,6 +19,7 @@ Lettore PDF leggero e portatile per Windows 10 e 11. Apri, leggi, cerca e stampa
 - **Salvare e bloccare**: sigilla il PDF firmato con un sigillo digitale personale, così ogni modifica fatta dopo con un altro programma viene segnalata da chi controlla le firme. Su richiesta aggiunge una data certa (marca temporale).
 - **Certificati**: da Strumenti › Certificati… fai una copia di sicurezza del sigillo personale (protetta da una password) per portarlo su un altro PC, oppure importa un certificato .p12/.pfx (per esempio quello della tua azienda) e firma con quello. Se ne hai più di uno, scegli con quale bloccare il PDF.
 - **PDF bloccati**: aprendo un PDF bloccato (anche da altri programmi) una barra dice chi l'ha bloccato e quando, e avvisa in rosso se è stato modificato dopo. Il documento si può leggere, cercare, copiare e stampare, ma non modificare; «Salva con nome» ne salva una copia identica, con il sigillo intatto.
+- **Firme digitali ricevute**: se un PDF ha firme digitali, la scheda **Firme** del pannello laterale dice per ognuna chi ha firmato e quando, se il documento è stato modificato dopo e se l'identità è garantita da un certificato riconosciuto da Windows. Un clic porta al campo della firma; con il tasto destro salvi la versione esatta che era stata firmata o guardi i dettagli del certificato. La revoca dei certificati non si controlla (servirebbe internet).
 - **Stampare** quello che vedi, firme comprese.
 - **Informazioni**: dal menu Aiuto vedi la versione, la licenza e il link al codice sorgente.
 
@@ -70,7 +71,7 @@ PieDF non invia dati in rete. I soli collegamenti verso l'esterno sono:
 - l'apertura di un link contenuto in un PDF (nel browser o nel programma di posta), solo dopo il clic e la conferma dell'indirizzo (lo stesso vale per i link della finestra Informazioni);
 - la **data certa** di «Salva e blocca», solo se spunti «Aggiungi data certa»: PieDF chiede una marca temporale a un servizio pubblico e gratuito di marche temporali inviando solo un'impronta del documento, mai il documento o il tuo nome. La casella è spenta finché non la scegli tu.
 
-Il sigillo personale di «Salva e blocca» si crea sul tuo PC e la sua chiave resta nella cartella dei dati, protetta con il tuo utente di Windows. Lo stesso vale per i certificati che importi: il file .p12/.pfx e la sua password non vengono conservati.
+Il sigillo personale di «Salva e blocca» si crea sul tuo PC e la sua chiave resta nella cartella dei dati, protetta con il tuo utente di Windows. Lo stesso vale per i certificati che importi: il file .p12/.pfx e la sua password non vengono conservati. Il controllo delle firme digitali dei PDF che apri avviene tutto sul tuo PC, con i certificati già presenti in Windows, senza collegarsi a internet.
 
 *Privacy policy*: this program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
 
